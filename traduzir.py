@@ -558,6 +558,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"LM Studio OK em {args.base_url} — {len(modelos)} modelo(s) carregado(s).")
         logger.info("Modelos disponíveis: %s", ", ".join(modelos))
 
+    # ── Verificação do EPUB de entrada ──
+    # O EPUB de validação NÃO é versionado (copyright de terceiros): quem
+    # clonou o repositório precisa apontar --src para o próprio arquivo.
+    if not Path(args.src).is_file():
+        print(
+            f"ERRO: EPUB de entrada não encontrado: {args.src}\n"
+            f"      Use --src CAMINHO/livro.epub para indicar o arquivo "
+            f"(o 'validacao.epub' não vem com o repositório).",
+            file=sys.stderr,
+        )
+        logger.error("EPUB de entrada não encontrado: %s", args.src)
+        return 2
+
     # ── Execução ──
     cfg = TranslationConfig(
         src=args.src,

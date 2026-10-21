@@ -27,10 +27,18 @@ CLI em Python que traduz livros `.epub` inteiros usando modelos de linguagem loc
 │   └── <livro>_translated.epub.cache.json
 ├── epub_translator.py        # entry point do pacote
 ├── traduzir.py              # script de entrega (capítulo único + verificação final)
-├── validacao.epub            # EPUB de validação (somente leitura)
+├── validacao.epub            # EPUB de validação (somente leitura, NÃO versionado)
 ├── FORJA.md                  # memória do projeto
 └── requirements.txt
 ```
+
+> ⚠️ **O `validacao.epub` não está no repositório** (é o volume 15 de *Mushoku
+> Tensei*, ~17 MB, copyright de Seven Seas Entertainment — não é nosso para
+> redistribuir). Os exemplos deste README usam esse nome de arquivo: aponte
+> `src` para **qualquer EPUB que você tenha** (`python epub_translator.py
+> meu-livro.epub ...`) ou para os EPUBs sintéticos de `fixtures/`, que ARE
+> versionados. O `traduzir.py` também espera um `validacao.epub` na raiz —
+> ajuste a constante no topo do script se usar outro arquivo.
 
 **Regra da pasta `saida/`**: todo EPUB traduzido, log e cache JSON vai para
 `saida/`. A pasta é criada automaticamente se não existir — tanto pelo
