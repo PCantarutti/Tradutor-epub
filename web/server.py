@@ -577,12 +577,35 @@ def pausar_job(
 
 
 @app.post("/api/jobs/{job_id}/resume")
-def retomar_job(
-    job_id: str, manager: JobManager = Depends(obter_gerenciador)
+async def retomar_job(
+    job_id: str,
+    request: Request,
+    manager: JobManager = Depends(obter_gerenciador),
 ) -> dict[str, Any]:
-    """Retoma o job com o MESMO cache (os blocos já traduzidos voltam)."""
+    """Retoma o job com o MESMO cache (os blocos já traduzidos voltam).
+
+    Body opcional: ``{"api_key": str}``. A chave real só vive em memória;
+    um job recarregado do disco (servidor reiniciado) tem apenas a versão
+    mascarada (``abc…wxyz``), que quebraria o header HTTP — nesse caso a
+    chave precisa vir no corpo.
+    """
     job = _obter_job(job_id, manager)
-    manager.retomar(job)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    nova_chave = str((payload or {}).get("api_key") or "")
+    if nova_chave:
+        job.config["api_key"] = nova_chave
+    elif "…" in str(job.config.get("api_key", "")) or job.config.get("api_key") == "***":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "A chave de API deste job não está mais em memória (o servidor "
+                "foi reiniciado). Envie-a no corpo: {\"api_key\": \"...\"}."
+            ),
+        )
+    await asyncio.to_thread(manager.retomar, job)
     return {"paused": False, "state": job.state}
 
 

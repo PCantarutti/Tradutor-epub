@@ -572,6 +572,23 @@ class TestControle:
         manager.cancelar(job)
         manager.aguardar(job, 30.0)
 
+    def test_retomar_com_chave_mascarada_exige_chave(
+        self, cliente: TestClient, manager: JobManager, epub_teste: Path
+    ) -> None:
+        """Job recarregado do disco só tem a chave mascarada: 400 sem chave."""
+        job = _job_parado(manager, epub_teste)
+        job.config["api_key"] = "abc…wxyz"
+
+        assert cliente.post(f"/api/jobs/{job.id}/resume").status_code == 400
+
+        resposta = cliente.post(
+            f"/api/jobs/{job.id}/resume", json={"api_key": "chave-real-123"}
+        )
+        assert resposta.status_code == 200
+        assert job.config["api_key"] == "chave-real-123"
+        manager.cancelar(job)
+        manager.aguardar(job, 30.0)
+
     def test_cancelar(
         self, cliente: TestClient, manager: JobManager, epub_teste: Path
     ) -> None:
