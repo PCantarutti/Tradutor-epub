@@ -80,6 +80,12 @@ class TestParseResponse:
         with pytest.raises(MalformedResponseError):
             parse_response(texto, expected=4)
 
+    def test_bloco_unico_sem_separador(self) -> None:
+        """Pedido de 1 bloco sem '[1]' na resposta: a resposta é o bloco."""
+        assert parse_response("só o texto", expected=1) == [(1, "só o texto")]
+        with pytest.raises(MalformedResponseError):
+            parse_response("só o texto", expected=2)
+
 
 # ── Testes build_system / build_user ────────────────────────────────────────
 

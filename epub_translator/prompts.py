@@ -189,6 +189,11 @@ def parse_response(text: str, expected: int | None = None) -> list[tuple[int, st
     if current_idx is not None:
         result.append((current_idx, "\n".join(current_lines).strip()))
 
+    # Pedido de UM bloco respondido sem o '[1]': a resposta inteira é o bloco
+    # (marcadores e idioma ainda são validados pelo tradutor).
+    if not result and expected == 1 and text.strip():
+        return [(1, text.strip())]
+
     if not result:
         raise MalformedResponseError(
             "Resposta não contém blocos numerados no formato esperado [i]"
