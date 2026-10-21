@@ -96,3 +96,7 @@
 - o log não registrava por bloco → agora registra arquivo, índice, status e motivo.
 - resposta vazia para bloco não-vazio → conta como falha, mantém o original.
 - o índice do bloco na chave do cache reiniciava por arquivo → a chave agora inclui `file_path`.
+
+**README — camada web documentada (2026-10-21)**: a seção "Interface visual (web)" do `README.md` agora traz `python -m uvicorn web.server:app --port 8000` (back-end que serve a interface na **mesma origem** quando `web/ui/dist/` existe), o modo dev (`npm run dev` em `web/ui` → 5173, com proxy de `/api` para a 8000), o build de produção e o troubleshooting. Validado de ponta a ponta: build do front-end, interface na 8000, proxy do Vite, e um job completo pela API (16/16 blocos, 0 falhas, EPUB baixável com `mimetype` como 1ª entrada ZIP_STORED).
+
+**FORMATO DO PROMPT (armadilha ao mockar um provedor)**: o `build_user` manda o separador `[i]` **sozinho numa linha** e o texto do bloco na linha seguinte (`epub_translator/prompts.py:60-65`). Um provedor falso que devolva `[i] texto` na mesma linha produz blocos vazios e o job termina em `error` ("o modelo devolveu bloco vazio"). O mesmo formato precisa ser devolvido na resposta.
