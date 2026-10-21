@@ -3,6 +3,10 @@
 Interface web do Tradutor de EPUB: React 18 + Vite + TypeScript + Tailwind v3,
 falando com o back-end FastAPI (`web/server.py`) por `/api`.
 
+A documentação completa de uso (incluindo como subir o back-end com
+`python -m uvicorn web.server:app --port 8000`) está no
+[README da raiz](../../README.md#interface-visual-web).
+
 ## Comandos
 
 ```bash

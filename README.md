@@ -2,6 +2,11 @@
 
 CLI em Python que traduz livros `.epub` inteiros usando modelos de linguagem locais do **LM Studio** (API compatível com OpenAI), preservando a estrutura do EPUB: `mimetype` como primeira entrada ZIP_STORED, imagens e CSS byte-idênticos, tags inline, índice (NCX/NAV), título e `dc:language`.
 
+Há duas formas de usar:
+
+- **CLI** — `python epub_translator.py livro.epub ...` (linha de comando, ideal para automação).
+- **Interface web** — `python -m uvicorn web.server:app --port 8000` (interface visual com progresso em tempo real, preview lado a lado e pausa/retomada). Veja a seção [Interface visual (web)](#interface-visual-web).
+
 ## Estrutura de pastas
 
 ```
@@ -15,6 +20,12 @@ CLI em Python que traduz livros `.epub` inteiros usando modelos de linguagem loc
 │   ├── prompts.py            # prompt de sistema e parser da resposta
 │   └── translator.py         # orquestração do pipeline
 ├── tests/                    # suíte de testes (pytest)
+├── web/                      # camada web (back-end FastAPI + front-end React)
+│   ├── server.py             # rotas da API (/api/jobs, SSE, download, preview…)
+│   ├── jobs.py               # job em disco + barramento de eventos
+│   ├── preview.py            # capítulos, títulos via NCX, HTML de preview
+│   ├── jobs/<id>/            # dados de cada job (original, saída, cache, log)
+│   └── ui/                   # front-end React + Vite + TypeScript + Tailwind
 ├── fixtures/                 # EPUBs de entrada usados em testes e exemplos
 │   ├── fixed_input.epub
 │   └── test_input.epub
@@ -74,7 +85,11 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-**Dependências**: `requests`, `lxml`, `PyYAML`, `rich`, `pytest`.
+**Dependências** (todas em `requirements.txt`): `requests`, `lxml`, `PyYAML`, `rich`,
+`pytest` — mais `fastapi`, `uvicorn` e `python-multipart` para a camada web.
+
+**Front-end** (só para a interface visual): `npm` + Node 18+. Rodando em
+desenvolvimento, o Vite fica na 5173 e faz proxy de `/api` para a 8000.
 
 ## Servidor do LM Studio
 
@@ -92,6 +107,90 @@ python epub_translator.py validacao.epub --list-models
 ```
 
 **Carregar um modelo:** no LM Studio, baixe um modelo na aba Download e carregue-o antes de iniciar o servidor.
+
+## Interface visual (web)
+
+Além da CLI, existe uma **interface web** que faz o mesmo trabalho com
+barras de progresso, preview lado a lado e controle de pausa/retomada.
+
+### 1. Instalar o front-end (uma vez)
+
+```bash
+cd web/ui
+npm install
+```
+
+### 2. Subir o back-end (encaminha também a interface)
+
+Na **raiz do projeto**:
+
+```bash
+python -m uvicorn web.server:app --port 8000
+```
+
+Isso sobe a API em `http://localhost:8000`. Se `web/ui/dist/` já existir
+(gerado por `npm run build`), a interface visual é servida **na mesma
+origem**: é só abrir **[http://localhost:8000](http://localhost:8000)** no
+navegador.
+
+Sem o `dist/`, o back-end responde 404 nas rotas de interface com a mensagem
+“O front-end ainda não foi construído (rode `npm run build` em web/ui)”.
+Nesse caso, use o modo de desenvolvimento (abaixo).
+
+### 3. Modo de desenvolvimento (front-end com recarga automática)
+
+Dois terminais:
+
+```bash
+# Terminal 1 — back-end (na raiz do projeto)
+python -m uvicorn web.server:app --port 8000
+
+# Terminal 2 — front-end Vite (em web/ui)
+cd web/ui
+npm run dev
+```
+
+O Vite sobe em **[http://localhost:5173](http://localhost:5173)** e faz proxy
+de `/api` para a porta 8000. É o modo para mexer no front-end: as mudanças
+recarregam a página sem reiniciar o back-end.
+
+| Modo | Comando | Endereço | Quando usar |
+|---|---|---|---|
+| Produção (local) | `python -m uvicorn web.server:app --port 8000` | http://localhost:8000 | uso normal, com `npm run build` feito |
+| Desenvolvimento | `npm run dev` (em `web/ui`) | http://localhost:5173 | mexer no front-end |
+
+### 4. Gerar o build de produção
+
+```bash
+cd web/ui
+npm run build     # tsc -b && vite build -> gera web/ui/dist/
+```
+
+O `dist/` **não** é versionado (está no `.gitignore`): é gerado a partir do
+código-fonte.
+
+### Como usar a interface
+
+1. **Provedor** — no seletor, escolha *LM Studio* ou *API compatível com
+   OpenAI* e preencha a URL base (ex.: `http://localhost:1234/v1` ou
+   `https://ollama.com/v1`), a chave (só para provedores que exigem) e o
+   modelo. O botão **Testar conexão** lista os modelos do servidor.
+2. **Livro** — envie o `.epub`, escolha o nome do arquivo de saída e, se
+   quiser, envie um glossário de nomes próprios (`.json`, `.yaml` ou `.txt`).
+3. **Traduzir** — o progresso chega em tempo real (SSE), com contadores de
+   blocos traduzidos, vindos do cache, com falha e descartados.
+4. **Controle** — **Pausar**, **Retomar** (o cache é preservado: nada é
+   re-traduzido) e **Cancelar** ficam no painel de progresso.
+5. **Resultado** — preview **original × traduzido** capítulo a capítulo,
+   o painel de **integridade** do EPUB gerado, o **log** e o botão
+   **Baixar EPUB**.
+
+Os dados de cada job ficam em `web/jobs/<id>/` (`original.epub`,
+`traducao.epub`, `cache.json`, `traducao.epub.log`, `job.json`) — essa pasta
+é ignorada pelo Git e pode ser apagada à vontade.
+
+> A chave de API **nunca** é gravada em claro: no `job.json` ela fica
+> mascarada e não aparece em nenhuma resposta da API.
 
 ## Uso
 
@@ -410,6 +509,36 @@ python epub_translator.py livro.epub --target pt-BR --model "meu-modelo" --no-ca
 ### Glossário ignorado
 
 Se a CLI imprimir `Glossário YAML deve ser um mapeamento chave-valor`, o arquivo existe mas não está no formato de mapeamento. Use `termo: tradução` (YAML) ou um `.json` válido.
+
+### "O front-end ainda não foi construído (rode `npm run build` em web/ui)"
+
+A rota da interface devolve essa mensagem quando `web/ui/dist/` não existe —
+o back-end serve a API, mas não tem o que mostrar na tela. Rode o build:
+
+```bash
+cd web/ui
+npm install     # só na primeira vez
+npm run build
+```
+
+Depois é só abrir http://localhost:8000 de novo. Para desenvolver com
+recarregamento automático, use o modo de desenvolvimento (`npm run dev` na
+5173) em vez do build.
+
+### A interface abre mas a tradução não começa
+
+- O botão **Traduzir** só habilita depois que um `.epub` é escolhido.
+- Clique em **Testar conexão** no painel do provedor: se o ponto ficar
+  vermelho, o problema é a URL base, a chave ou o modelo — não o livro.
+- Com a Ollama Cloud, a URL é `https://ollama.com/v1` e a chave é
+  obrigatória. Com o LM Studio local, a chave fica **vazia**.
+
+### "Job não encontrado" (404)
+
+O job fica em `web/jobs/<id>/`. Se a pasta foi apagada (ou o servidor foi
+reiniciado com a pasta limpa), o job não existe mais — crie outro. O
+`job.json` permite retomar o job depois de reiniciar o servidor, desde que a
+pasta `web/jobs/` tenha sido preservada.
 
 ### EPUB de saída não abre no leitor
 
