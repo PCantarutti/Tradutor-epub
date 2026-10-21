@@ -1,0 +1,29 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-fundo text-texto font-sans antialiased;
+  }
+}
+
+@layer components {
+  /*
+   * Parágrafo destacado do preview (o mesmo `data-block-index` aparece nos
+   * dois painéis ao mesmo tempo). Não dá para usar uma classe Tailwind aqui:
+   * o elemento é marcado via DOM (o HTML do capítulo é injetado com
+   * `dangerouslySetInnerHTML` e o React não conhece os elementos dentro dele).
+   */
+  .bloco-destacado {
+    background-color: rgba(56, 189, 248, 0.16);
+    box-shadow: inset 3px 0 0 0 #38bdf8;
+    border-radius: 2px;
+  }
+}

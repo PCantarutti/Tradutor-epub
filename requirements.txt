@@ -1,0 +1,8 @@
+requests
+lxml
+PyYAML
+rich
+pytest
+fastapi
+uvicorn
+python-multipart

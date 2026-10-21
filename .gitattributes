@@ -1,0 +1,24 @@
+# Normaliza as quebras de linha: o repositório guarda LF, o Windows converte
+# para CRLF na cópia de trabalho. Sem isso, cada `git diff` no Windows mostra
+# o arquivo inteiro como alterado.
+* text=auto eol=lf
+
+# Binários: nunca tocar (o tradutor exige que imagens e CSS sejam
+# byte-idênticos entre a entrada e a saída do EPUB).
+*.epub binary
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.gif binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.mp3 binary
+*.mp4 binary
+*.pdf binary
+*.zip binary
+
+# Lockfile do npm: LF garantido, o diff é sensível à quebra de linha.
+web/ui/package-lock.json text eol=lf
