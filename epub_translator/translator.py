@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -34,6 +35,9 @@ from .lmstudio_client import LMStudioClient, MockClient
 from .prompts import MalformedResponseError, build_system, build_user, parse_response
 
 logger = logging.getLogger("epub_translator")
+
+# Hiragana, katakana, ideogramas CJK e hangul.
+_CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
 
 
 def _opf_title(opf_bytes: bytes) -> str:
@@ -331,6 +335,8 @@ def translate_epub(
 
     report = Report()
     overrides: dict[str, bytes] = {}
+    # Chaves de cache do lote corrente (compartilhadas com _tentar_grupo).
+    keys_lote: dict[int, str] = {}
     pausado = False
 
     def _emitir(
@@ -378,7 +384,8 @@ def translate_epub(
         """
         # (f) chave por bloco: calculada sobre o texto ORIGINAL, ANTES
         # da tradução — é a MESMA chave usada no put depois.
-        keys: dict[int, str] = {}
+        keys = keys_lote
+        keys.clear()
         uncached: list[tuple[int, Block]] = []
 
         for global_index, b in batch:
@@ -412,136 +419,111 @@ def translate_epub(
         if not uncached:
             return
 
-        # O modelo responde numerando de 1 dentro do lote.
-        lote_para_prompt = [b for _, b in uncached]
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": build_user(lote_para_prompt)},
-        ]
-
-        # Tentativas com retry
-        response_text: str | None = None
-        last_error: str = ""
-        for attempt in range(cfg.max_attempts):
-            try:
-                response_text = client.chat(messages, temperature=cfg.temperature)
+        # Cada falha (rede, resposta malformada, bloco ausente/vazio, CJK,
+        # marcador) é retentada. A 1ª tentativa vai com o lote inteiro; as
+        # seguintes, UM bloco por requisição — lote menor = menos chance de
+        # o modelo embaralhar a numeração.
+        pendentes = uncached
+        motivos: dict[int, tuple[str, str]] = {}
+        for tentativa in range(cfg.max_attempts):
+            if not pendentes:
                 break
-            except Exception as exc:
-                last_error = str(exc)
+            grupos = [pendentes] if tentativa == 0 else [[p] for p in pendentes]
+            pendentes = [
+                item
+                for grupo in grupos
+                for item in _tentar_grupo(href, blocks, grupo, motivos)
+            ]
+            if pendentes and tentativa < cfg.max_attempts - 1:
                 logger.warning(
-                    "Tentativa %d/%d falhou para %s: %s",
-                    attempt + 1,
+                    "%s: %d bloco(s) com falha na tentativa %d/%d; retentando "
+                    "um por um",
+                    href,
+                    len(pendentes),
+                    tentativa + 1,
                     cfg.max_attempts,
-                    href,
-                    exc,
-                )
-                if attempt < cfg.max_attempts - 1:
-                    continue
-                logger.error(
-                    "Todos os %d attempts falharam para %s",
-                    cfg.max_attempts,
-                    href,
                 )
 
-        if response_text is None:
-            for global_index, b in uncached:
-                report.failed_blocks += 1
-                logger.error(
-                    "%s bloco %d: FALHOU — %s",
-                    href,
-                    global_index,
-                    last_error or "erro desconhecido",
-                )
-                _emitir(
-                    "falhou",
-                    href,
-                    global_index,
-                    len(blocks),
-                    last_error or "erro desconhecido",
-                )
-            return
-
-        # parse_response
-        try:
-            parsed = parse_response(response_text)
-        except MalformedResponseError as exc:
-            for global_index, b in uncached:
-                report.failed_blocks += 1
-                logger.error(
-                    "%s bloco %d: FALHOU — resposta malformada: %s",
-                    href,
-                    global_index,
-                    exc,
-                )
-                _emitir(
-                    "falhou",
-                    href,
-                    global_index,
-                    len(blocks),
-                    f"resposta malformada: {exc}",
-                )
-            return
-
-        translated_map: dict[int, str] = dict(parsed)
-
-        for position, (global_index, b) in enumerate(uncached):
-            local_idx = position + 1  # 1-based dentro do lote
-            original_text = b.text
-
-            if local_idx not in translated_map:
-                report.failed_blocks += 1
-                logger.error(
-                    "%s bloco %d: FALHOU — o modelo não devolveu este bloco",
-                    href,
-                    global_index,
-                )
-                _emitir(
-                    "falhou",
-                    href,
-                    global_index,
-                    len(blocks),
-                    "o modelo não devolveu este bloco",
-                )
-                continue
-
-            translated_text = translated_map[local_idx]
-
-            # Resposta vazia para bloco não-vazio: mantém o original.
-            if not translated_text.strip() and original_text.strip():
-                report.failed_blocks += 1
-                logger.error(
-                    "%s bloco %d: FALHOU — o modelo devolveu bloco vazio",
-                    href,
-                    global_index,
-                )
-                _emitir(
-                    "falhou",
-                    href,
-                    global_index,
-                    len(blocks),
-                    "o modelo devolveu bloco vazio",
-                )
-                continue
-
-            # Validação dos marcadores: a tradução precisa devolver os
-            # marcadores byte a byte, na mesma ordem. Se não devolver,
-            # o bloco é DESCARTADO (não reconstruído errado).
-            ok, motivo = compare_markers(original_text, translated_text)
-            if not ok:
+        for global_index, _ in pendentes:
+            status, motivo = motivos[global_index]
+            if status == "descartado":
                 report.discarded_blocks += 1
                 logger.error(
-                    "%s bloco %d: DESCARTADO — marcador inválido: %s",
-                    href,
-                    global_index,
-                    motivo,
+                    "%s bloco %d: DESCARTADO — %s", href, global_index, motivo
                 )
-                _emitir(
-                    "descartado",
-                    href,
-                    global_index,
-                    len(blocks),
-                    f"marcador inválido: {motivo}",
+            else:
+                report.failed_blocks += 1
+                logger.error(
+                    "%s bloco %d: FALHOU — %s", href, global_index, motivo
                 )
+            _emitir(status, href, global_index, len(blocks), motivo)
+
+    def _tentar_grupo(
+        href: str,
+        blocks: list[Block],
+        grupo: list[tuple[int, Block]],
+        motivos: dict[int, tuple[str, str]],
+    ) -> list[tuple[int, Block]]:
+        """Uma requisição ao modelo; aplica os acertos e devolve as falhas.
+
+        O motivo de cada falha fica em ``motivos`` (vale o da última
+        tentativa).
+        """
+        messages = [
+            {"role": "system", "content": system_prompt},
+            # O modelo responde numerando de 1 dentro do lote.
+            {"role": "user", "content": build_user([b for _, b in grupo])},
+        ]
+
+        def _falhar(motivo: str, status: str = "falhou") -> list[tuple[int, Block]]:
+            for global_index, _ in grupo:
+                motivos[global_index] = (status, motivo)
+            return grupo
+
+        try:
+            response_text = client.chat(messages, temperature=cfg.temperature)
+        except Exception as exc:
+            logger.warning("Requisição falhou para %s: %s", href, exc)
+            return _falhar(str(exc) or "erro desconhecido")
+
+        try:
+            parsed = parse_response(response_text, expected=len(grupo))
+        except MalformedResponseError as exc:
+            logger.debug(
+                "%s: resposta malformada (início): %r", href, response_text[:500]
+            )
+            return _falhar(f"resposta malformada: {exc}")
+
+        translated_map: dict[int, str] = dict(parsed)
+        falhas: list[tuple[int, Block]] = []
+
+        for local_idx, (global_index, b) in enumerate(grupo, start=1):
+            original_text = b.text
+            translated_text = translated_map.get(local_idx)
+            erro: tuple[str, str] | None = None
+
+            if translated_text is None:
+                erro = ("falhou", "o modelo não devolveu este bloco")
+            elif not translated_text.strip() and original_text.strip():
+                # Resposta vazia para bloco não-vazio: mantém o original.
+                erro = ("falhou", "o modelo devolveu bloco vazio")
+            elif _CJK_RE.search(translated_text) and not _CJK_RE.search(
+                original_text
+            ):
+                # Modelos Qwen às vezes "escorregam" para o chinês no meio
+                # da frase.
+                erro = ("falhou", "a tradução contém caracteres CJK")
+            else:
+                # Validação dos marcadores: a tradução precisa devolver os
+                # marcadores byte a byte, na mesma ordem. Se não devolver,
+                # o bloco é DESCARTADO (não reconstruído errado).
+                ok, motivo = compare_markers(original_text, translated_text)
+                if not ok:
+                    erro = ("descartado", f"marcador inválido: {motivo}")
+
+            if erro is not None:
+                motivos[global_index] = erro
+                falhas.append((global_index, b))
                 continue
 
             b.text = translated_text
@@ -557,7 +539,9 @@ def translate_epub(
             # (j) cache.put com a MESMA chave do get (calculada sobre o
             # texto original) — por isso o guardamos em `keys`.
             if cache is not None:
-                cache.put(keys[global_index], translated_text)
+                cache.put(keys_lote[global_index], translated_text)
+
+        return falhas
 
     for href in text_files:
         logger.info("Traduzindo arquivo: %s", href)

@@ -639,3 +639,48 @@ class TestModeloResolvidoUmaVez:
             mod.LMStudioClient = original
 
         assert len(chamadas) == 3  # 1 manual + 2 manuais, o mock memoriza
+
+
+# ── Retry de falhas (resposta malformada / CJK) ──────────────────────────────
+
+
+class ClienteRoteirizado(ClienteRespostaCrua):
+    """Devolve respostas pré-definidas nas primeiras chamadas; depois, a
+    resposta crua normal (texto em maiúsculas)."""
+
+    def __init__(self, roteiro: list[str]) -> None:
+        super().__init__(str.upper)
+        self._roteiro = list(roteiro)
+
+    def chat(self, messages, temperature: float = 0.25, max_tokens=None) -> str:
+        if self._roteiro:
+            self.chamadas += 1
+            return self._roteiro.pop(0)
+        return super().chat(messages, temperature, max_tokens)
+
+
+class TestRetryDeFalhas:
+    """Falhas do lote são retentadas um bloco por requisição."""
+
+    def _traduzir(self, epub: Path, tmp_path: Path, cliente) -> object:
+        out = tmp_path / "out.epub"
+        cfg = TranslationConfig(
+            src=str(epub), output=str(out), use_cache=False, only="OEBPS/ch1.xhtml"
+        )
+        return translate_epub(str(epub), str(out), cfg, client=cliente)
+
+    def test_resposta_malformada_e_retentada(
+        self, epub_2_capitulos: Path, tmp_path: Path
+    ) -> None:
+        cliente = ClienteRoteirizado(["desculpe, não entendi"])
+        report = self._traduzir(epub_2_capitulos, tmp_path, cliente)
+        assert report.failed_blocks == 0
+        assert report.translated_blocks == report.total_blocks
+
+    def test_caracteres_cjk_sao_retentados(
+        self, epub_2_capitulos: Path, tmp_path: Path
+    ) -> None:
+        cliente = ClienteRespostaCrua(lambda t: t + " 我们")
+        report = self._traduzir(epub_2_capitulos, tmp_path, cliente)
+        assert report.translated_blocks == 0
+        assert report.failed_blocks == report.total_blocks

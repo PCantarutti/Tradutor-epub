@@ -39,6 +39,10 @@ def build_system(
         "7. Use a formatação técnica correta do idioma alvo.",
         "8. Devolva APENAS o conteúdo do bloco: não acrescente prefixo de "
         "tag, rótulos, comentários nem texto extra.",
+        f"9. Escreva SOMENTE em {target_lang}: nunca use caracteres chineses, "
+        "japoneses ou coreanos.",
+        "10. Use cada separador [i] UMA única vez, na ordem recebida, e "
+        "devolva TODOS os blocos.",
     ]
 
     if glossary:
@@ -106,7 +110,9 @@ class MalformedResponseError(Exception):
 
 
 # Separadores de bloco aceitos: '[i]' (formato do prompt) e 'i' (forma crua)
-_BRACKET_SEPARATOR_RE = re.compile(r"^\[(\d+)\]$")
+_BRACKET_SEPARATOR_RE = re.compile(r"^\**\[(\d+)\]\**:?$")
+# '[3] texto' na mesma linha: alguns modelos colam o texto no separador.
+_INLINE_SEPARATOR_RE = re.compile(r"^\**\[(\d+)\]\**:?\s+(\S.*)$")
 _RAW_SEPARATOR_RE = re.compile(r"^(\d+)$")
 
 
@@ -133,7 +139,7 @@ def separator_index(line: str) -> int | None:
 _separator_index = separator_index
 
 
-def parse_response(text: str) -> list[tuple[int, str]]:
+def parse_response(text: str, expected: int | None = None) -> list[tuple[int, str]]:
     """Parseia a resposta do modelo voltando ao formato [i]\n<texto>.
 
     Aceita separadores ``[i]`` e ``i``.
@@ -145,6 +151,10 @@ def parse_response(text: str) -> list[tuple[int, str]]:
 
     Args:
         text: Texto da resposta do modelo.
+        expected: Quantos blocos foram enviados. Se a resposta trouxer
+            exatamente esse número de blocos, a numeração é refeita pela
+            POSIÇÃO (o modelo às vezes repete um número, ex. ``1,2,3,4,4``,
+            mas devolve todos os blocos na ordem).
 
     Returns:
         Lista de (index, translated_text) para cada bloco.
@@ -158,7 +168,12 @@ def parse_response(text: str) -> list[tuple[int, str]]:
     current_lines: list[str] = []
 
     for line in lines:
+        if line.strip().startswith("```"):
+            continue  # cercas de markdown não fazem parte da tradução
         separator = separator_index(line)
+        inline = None if separator is not None else _INLINE_SEPARATOR_RE.match(line.strip())
+        if inline:
+            separator = int(inline.group(1))
 
         if separator is not None:
             # Salva bloco anterior se existir
@@ -166,7 +181,7 @@ def parse_response(text: str) -> list[tuple[int, str]]:
                 result.append((current_idx, "\n".join(current_lines).strip()))
 
             current_idx = separator
-            current_lines = []
+            current_lines = [inline.group(2)] if inline else []
         elif current_idx is not None:
             current_lines.append(line)
 
@@ -178,6 +193,9 @@ def parse_response(text: str) -> list[tuple[int, str]]:
         raise MalformedResponseError(
             "Resposta não contém blocos numerados no formato esperado [i]"
         )
+
+    if expected is not None and len(result) == expected:
+        return [(pos, txt) for pos, (_, txt) in enumerate(result, start=1)]
 
     # Validação relaxada: índices podem ser não consecutivos (lote que
     # começa no bloco 7 devolve 7, 8, 9), mas precisam ser estritamente

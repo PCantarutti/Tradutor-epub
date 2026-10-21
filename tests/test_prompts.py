@@ -61,11 +61,24 @@ class TestParseResponse:
         assert result == [(1, "linha1\nlinha2")]
 
     def test_separador_deve_casar_exatamente(self) -> None:
-        """Linha com prefixo/sufito extra não vira separador."""
-        with pytest.raises(MalformedResponseError):
-            parse_response("[1] texto\nconteudo")
+        """Linha com prefixo extra não vira separador."""
         with pytest.raises(MalformedResponseError):
             parse_response("bloco [1]\nconteudo")
+
+    def test_texto_colado_no_separador(self) -> None:
+        """'[1] texto' na mesma linha: o texto entra no bloco."""
+        assert parse_response("[1] texto\nconteudo") == [(1, "texto\nconteudo")]
+        assert parse_response("**[1]**\nnegrito") == [(1, "negrito")]
+
+    def test_cercas_markdown_ignoradas(self) -> None:
+        assert parse_response("```\n[1]\nbloco\n```") == [(1, "bloco")]
+
+    def test_expected_renumera_por_posicao(self) -> None:
+        """Número repetido, mas todos os blocos presentes: vale a posição."""
+        texto = "[1]\na\n[2]\nb\n[2]\nc"
+        assert parse_response(texto, expected=3) == [(1, "a"), (2, "b"), (3, "c")]
+        with pytest.raises(MalformedResponseError):
+            parse_response(texto, expected=4)
 
 
 # ── Testes build_system / build_user ────────────────────────────────────────
