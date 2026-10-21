@@ -7,7 +7,7 @@
 **Stack**: Python 3.12 no container (3.13 na máquina do usuário), sem framework no CLI. Deps: requests, lxml, PyYAML, rich, pytest. Camada web: fastapi, uvicorn, python-multipart (httpx/starlette já vêm como dependência).
 
 **Como rodar/testar**:
-- Suíte: `python -m pytest -q` (deps: `pip install -q -r requirements.txt`) — **377 testes** (2026-10-21, TASK-027)
+- Suíte: `python -m pytest -q` (deps: `pip install -q -r requirements.txt`) — **405 testes** (2026-10-21)
 - Script de entrega: `python traduzir.py` (traduz só `OEBPS/Text/section-0005.html` de `validacao.epub` → `saida/traducao_resultado.epub` + `saida/traducao_resultado.log`; faz a verificação final (a)-(g) e imprime o relatório).
 - Opções úteis: `--only CAMINHO` (traduz só esse arquivo do zip), `--limit-batches N` (teste rápido), `--verify-only` (só verifica), `--mock`, `--no-cache`, `--no-glossary`.
 - Pipeline sem servidor: `python epub_translator.py validacao.epub --mock --limit 12 --output saida/out.epub`
@@ -39,7 +39,15 @@
 
 **Entregue e validado**: 1275 blocos traduzidos em `validacao.epub` (12 arquivos do spine), 0 falhas; EPUB de saída com 51 entradas, mimetype 1ª ZIP_STORED, binários byte-idênticos, 229 `<p>` e 198 `<span>` preservados, 0 marcadores `[[n]]` remanescentes, `dc:language=pt-BR`, `dc:title` intacto, NCX íntegro. Cache validado: 2ª execução reusa 1155/1275 blocos.
 
-**Rodada `traduzir.py` (2026-10-21) — ENTREGUE**: `OEBPS/Text/section-0005.html` de `validacao.epub` traduzido para pt-BR com `qwen/qwen3.6-35b-a3b` no LM Studio local. 229 blocos: 1 descarte por marcador inválido na 1ª rodada (o modelo perdeu 1 dos 2 marcadores do bloco 82) e 228 traduzidos; a 2ª execução reusou 228 do cache, re-traduziu o bloco 82 e ficou **100% traduzido**. Verificação final 12/12 OK. Latência real: ~85s por lote de 5 blocos (46 lotes, ~68 min). Saída em `saida/traducao_resultado.epub`. Suíte: **239 testes**.
+**Rodada `traduzir.py` (2026-10-21) — ENTREGUE**: `OEBPS/Text/section-0005.html`
+
+**REPOSITÓRIO PÚBLICO (2026-10-21)**: `https://github.com/PCantarutti/Tradutor-epub` (branch `main`). O código-fonte INTEIRO foi versionado pela primeira vez (62 arquivos, ~0,8 MB) em 2 commits: `5e92ced` (`.gitignore` + `.gitattributes` + código) e `4969465` (README + validação do EPUB de entrada no `traduzir.py`).
+
+- **`.gitignore`**: ignora `__pycache__/`, `.pytest_cache/`, `node_modules/`, `web/ui/dist/`, `saida/`, `web/jobs/`, `.forja/` (memória interna do agente), segredos (`.env*`, `config.yaml`, `config.local.*`) e `validacao.epub` + `*.epub` (com exceção `!fixtures/*.epub`, que SÃO versionados).
+- **ARMADILHA DO `lib/`**: o padrão `lib/` do Python ignorava `web/ui/src/lib/util.ts` (código do front-end!). Os padrões Python que podem colidir com o front-end precisam ser **ancorados na raiz** (`/lib/`, `/dist/`, `/build/`).
+- **`.gitattributes`**: `* text=auto eol=lf` (o `core.autocrlf=true` do Windows fazia cada `git diff` mostrar o arquivo inteiro como alterado) + binários marcados como `binary` (o tradutor exige imagens/CSS byte-idênticos).
+- **`validacao.epub` NÃO é versionado** (volume 15 de *Mushoku Tensei*, ~17 MB, copyright de Seven Seas). O README avisa e o `traduzir.py` agora valida a existência do EPUB de entrada ANTES de traduzir (exit 2 com mensagem apontando `--src`), em vez de estourar um `Errno 2` cru.
+- **`.forja/` é ignorado** — memória interna do agente, não vai para o GitHub. `FORJA.md` (na raiz) É versionado. de `validacao.epub` traduzido para pt-BR com `qwen/qwen3.6-35b-a3b` no LM Studio local. 229 blocos: 1 descarte por marcador inválido na 1ª rodada (o modelo perdeu 1 dos 2 marcadores do bloco 82) e 228 traduzidos; a 2ª execução reusou 228 do cache, re-traduziu o bloco 82 e ficou **100% traduzido**. Verificação final 12/12 OK. Latência real: ~85s por lote de 5 blocos (46 lotes, ~68 min). Saída em `saida/traducao_resultado.epub`. Suíte: **239 testes**.
 
 **Convenções**:
 - lxml para TODO XML (XHTML/OPF/NCX) — sem BeautifulSoup.
