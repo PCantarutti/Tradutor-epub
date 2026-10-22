@@ -206,12 +206,16 @@ class TestGlossario:
         for termo in ("Man-God", "Nanahoshi", "Eris", "Sylphie", "Roxy", "Ariel"):
             assert termo in glossario, termo
 
-    def test_termos_mapeados_para_si_mesmos(self) -> None:
-        """Cada termo do glossário é mapeado para si mesmo (não traduzir)."""
+    def test_nomes_e_titulos_mapeados_para_si_mesmos(self) -> None:
+        """Nomes e títulos de poder não são traduzidos; termos de magia e
+        instituições têm tradução fixa; palavras comuns ficam de fora."""
         with ARQUIVO_GLOSSARIO.open(encoding="utf-8") as f:
             dados = json.load(f)
-        for termo, traducao in dados.items():
-            assert traducao == termo, termo
+        for nome in ("Rudeus", "Orsted", "Zanoba", "Man-God", "Sword God", "North God"):
+            assert dados[nome] == nome, nome
+        assert dados["Stone Cannon"] == "Canhão de Pedra"
+        for comum in ("Dragon", "Giant", "Labyrinth", "North", "Refugee"):
+            assert comum not in dados, comum
 
     def test_man_god_nao_e_traduzido(self) -> None:
         """'Man-God' precisa sobreviver intacto na tradução."""

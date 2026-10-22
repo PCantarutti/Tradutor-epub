@@ -6,9 +6,19 @@ inserido no **prompt de sistema** do modelo, na seção `GLOSSÁRIO:`.
 
 ## `mushoku_tensei.json` — nomes próprios de *Mushoku Tensei*
 
-Este glossário é de **NOMES PRÓPRIOS** (personagens, lugares, títulos e
-raças). Cada termo é mapeado **para si mesmo**, ou seja: a instrução enviada ao
-modelo é "**não traduza** este termo".
+Este glossário (182 termos, revisado contra o texto dos volumes 17–26) segue
+duas regras:
+
+- **Nomes de pessoas, lugares e títulos de poder** (Rudeus, Orsted, Sharia,
+  Sword God, North God, Man-God…) são mapeados **para si mesmos**: "**não
+  traduza**". Os títulos ficam em inglês por consistência com os volumes já
+  traduzidos.
+- **Magias, itens, instituições e reinos** ganham uma tradução **fixa** em
+  pt-BR, igual em todos os livros (`Stone Cannon → Canhão de Pedra`,
+  `Asura Kingdom → Reino de Asura`, `Millis Church → Igreja de Millis`…).
+
+Palavras comuns (Dragon, Giant, Labyrinth…) **não** entram: forçá-las a ficar
+em inglês deixava "o Dragon" no meio do texto em português.
 
 ### Por que ele existe
 
