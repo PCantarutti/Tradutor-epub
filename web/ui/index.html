@@ -4,10 +4,18 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
-    <meta name="description" content="Tradução local de livros EPUB com modelos OpenAI-compatíveis (LM Studio)." />
+    <meta name="description" content="Tradução local de livros EPUB com modelos OpenAI-compatíveis." />
     <title>Tradutor de EPUB</title>
   </head>
   <body>
+    <!--
+      THESIS: um console de acompanhamento, não um formulário com barra de progresso; o livro inteiro aparece como um campo de barras, um traço por bloco, que se preenche ao vivo.
+      OWN-WORLD: grafite #0f1114, painéis com costura de 1px #262b33, cor só para estado (verde traduzido, aço cache, vermelho falha, âmbar descarte, violeta bloco atual), Segoe UI para interface e Cascadia Mono só para números e log.
+      STORY: o usuário inicia, volta 20 min depois e lê em um segundo quanto falta, onde falhou e o que está acontecendo; depois revisa lado a lado e retraduz só as falhas.
+      FIRST VIEWPORT: trilho de traduções à esquerda; no topo do principal, percentual grande em mono, o campo de barras ocupando a largura e as ações; abaixo, capítulos e preview lado a lado; log ao vivo na doca inferior.
+      FORM: console de desenvolvedor escuro (escolha do usuário) + campo de dados para o progresso; seed a1154d91.
+      FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md
+    -->
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

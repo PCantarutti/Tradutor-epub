@@ -485,11 +485,14 @@ def html_preview(
             bloco.element.set("data-block-index", str(indice))
 
     # (4) lado traduzido: troca o texto dos blocos traduzidos
-    if lado == LADO_TRADUZIDO and traducoes:
+    # Blocos sem tradução ganham ``data-pending`` (a UI os destaca).
+    if lado == LADO_TRADUZIDO:
         for indice, bloco in enumerate(blocos, start=1):
-            texto = traducoes.get(indice)
+            texto = (traducoes or {}).get(indice)
             if texto is not None:
                 bloco.text = texto
+            elif bloco.element is not None:
+                bloco.element.set("data-pending", "1")
 
     # (5) reconstrói as tags inline a partir dos marcadores
     raiz = replay(blocos, tree)

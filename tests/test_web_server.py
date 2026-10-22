@@ -638,6 +638,22 @@ class TestControle:
 
 # ── Capítulos e preview ─────────────────────────────────────────────────────
 
+class TestListarJobs:
+    """GET /api/jobs lista os jobs para a UI reabrir."""
+
+    def test_lista_jobs(
+        self, cliente: TestClient, manager: JobManager, epub_teste: Path
+    ) -> None:
+        job = _job_parado(manager, epub_teste)
+
+        resposta = cliente.get("/api/jobs")
+
+        assert resposta.status_code == 200
+        ids = [j["job_id"] for j in resposta.json()]
+        assert job.id in ids
+        assert "api_key" not in resposta.text
+
+
 class TestCapitulos:
     """``GET /api/jobs/{id}/chapters``."""
 
@@ -653,7 +669,9 @@ class TestCapitulos:
         capitulos = resposta.json()
         assert [c["path"] for c in capitulos] == [CAPITULO_1, CAPITULO_2]
         for capitulo in capitulos:
-            assert set(capitulo) == {"index", "path", "title", "blocks"}
+            assert set(capitulo) == {"index", "path", "title", "blocks", "pending", "mask"}
+            assert capitulo["mask"] == "0" * capitulo["blocks"]
+            assert capitulo["pending"] == capitulo["blocks"]  # nada traduzido
             assert capitulo["title"]
             assert capitulo["blocks"] > 0
 
@@ -760,7 +778,7 @@ class TestPreview:
         )
 
         assert traduzido.status_code == 200
-        assert traduzido.text == original.text
+        assert traduzido.text.replace(' data-pending="1"', "") == original.text
 
     def test_capitulo_inexistente_devolve_404(
         self, cliente: TestClient, manager: JobManager, epub_teste: Path
@@ -858,6 +876,25 @@ class TestLogEIntegridade:
 
         assert resposta.status_code == 200
         assert "Traduzindo arquivo" in resposta.json()["text"]
+
+    def test_log_incremental_por_offset(
+        self, cliente: TestClient, manager: JobManager, epub_teste: Path
+    ) -> None:
+        """Com ``offset``, só as linhas novas voltam (log em tempo real)."""
+        job = _job_parado(manager, epub_teste)
+        caminho = Path(job.log_path)
+        caminho.parent.mkdir(parents=True, exist_ok=True)
+        caminho.write_text("linha 1 — ç\n", encoding="utf-8")
+
+        primeira = cliente.get(f"/api/jobs/{job.id}/log").json()
+        with caminho.open("a", encoding="utf-8", newline="") as arquivo:
+            arquivo.write("linha 2\n")
+        segunda = cliente.get(
+            f"/api/jobs/{job.id}/log", params={"offset": primeira["offset"]}
+        ).json()
+
+        assert segunda["text"] == "linha 2\n"
+        assert segunda["offset"] == caminho.stat().st_size
 
     def test_log_inexistente_devolve_texto_vazio(
         self, cliente: TestClient, manager: JobManager, epub_teste: Path

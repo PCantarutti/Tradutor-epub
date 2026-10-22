@@ -10,20 +10,105 @@
   }
 
   body {
-    @apply bg-fundo text-texto font-sans antialiased;
+    @apply bg-fundo font-sans text-texto antialiased;
+    font-size: 13px;
+  }
+
+  /* Números sempre tabulares: contadores e tempos não "dançam" ao mudar. */
+  .num {
+    font-variant-numeric: tabular-nums;
+  }
+
+  :focus-visible {
+    outline: 1px solid theme('colors.texto');
+    outline-offset: 1px;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: theme('colors.borda');
+    border: 3px solid transparent;
+    background-clip: padding-box;
+    border-radius: 999px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
   }
 }
 
 @layer components {
+  /* Cabeçalho de painel: versalete pequena, sem "eyebrow" acima. */
+  .painel-titulo {
+    @apply text-[11px] font-semibold uppercase tracking-[0.08em] text-suave;
+  }
+
   /*
-   * Parágrafo destacado do preview (o mesmo `data-block-index` aparece nos
-   * dois painéis ao mesmo tempo). Não dá para usar uma classe Tailwind aqui:
-   * o elemento é marcado via DOM (o HTML do capítulo é injetado com
-   * `dangerouslySetInnerHTML` e o React não conhece os elementos dentro dele).
+   * Marcações do preview (aplicadas via DOM: o HTML do capítulo é injetado e
+   * o React não conhece os elementos dentro dele).
    */
   .bloco-destacado {
-    background-color: rgba(56, 189, 248, 0.16);
-    box-shadow: inset 3px 0 0 0 #38bdf8;
-    border-radius: 2px;
+    background-color: rgba(221, 226, 232, 0.07);
+    outline: 1px solid rgba(221, 226, 232, 0.3);
+    outline-offset: 2px;
+  }
+
+  /* Bloco sendo traduzido agora. */
+
+  /*
+   * Bloco sem tradução no painel traduzido (marcado pelo back-end): neutro
+   * por padrão (não tentado); vermelho só depois de um job concluído.
+   */
+  [data-pending] {
+    opacity: 0.55;
+  }
+  .preview-concluido [data-pending] {
+    opacity: 1;
+    background-color: rgba(229, 115, 115, 0.08);
+    text-decoration: underline wavy rgba(229, 115, 115, 0.55);
+    text-decoration-thickness: 1px;
+    text-underline-offset: 4px;
+  }
+
+  /* Enquanto a tradução roda, "sem tradução" é só "ainda não chegou". */
+  .preview-rodando [data-pending] {
+    background-color: transparent;
+    text-decoration: none;
+    opacity: 0.45;
+  }
+
+  /*
+   * Bloco em tradução: vem DEPOIS das regras de pendente e com especificidade
+   * maior, porque o bloco atual é sempre um pendente (senão o fundo some).
+   */
+  .bloco-atual,
+  .preview-rodando [data-pending].bloco-atual {
+    background-color: rgba(201, 166, 242, 0.16);
+    outline: 1px solid rgba(201, 166, 242, 0.8);
+    outline-offset: 3px;
+    text-decoration: none;
+    opacity: 1;
+  }
+
+  /* Bloco que acabou de chegar traduzido: um único brilho que some. */
+  .bloco-novo {
+    animation: bloco-novo 1.6s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+}
+
+@keyframes bloco-novo {
+  from {
+    background-color: rgba(124, 196, 164, 0.22);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bloco-novo {
+    animation: none;
   }
 }

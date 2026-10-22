@@ -15,9 +15,12 @@
  *    é injetado dentro do painel com os seletores **escopados** no container
  *    do preview, para não vazar para a interface do app.
  *
+ * 4. **Tempo real sem pular** — o HTML novo de um capítulo já aberto é
+ *    aplicado bloco a bloco (`Painel`): a rolagem nunca volta ao topo.
+ *
  * O HTML do capítulo chega **sanitizado** pelo back-end (sem `script`, sem
  * `style`, sem handlers `on*` e sem URLs `javascript:`/`data:`), por isso
- * pode ser injetado com `dangerouslySetInnerHTML`.
+ * pode ser injetado no DOM.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent, ReactElement, RefObject, UIEvent } from 'react'
@@ -25,19 +28,6 @@ import type { MouseEvent as ReactMouseEvent, ReactElement, RefObject, UIEvent } 
 import { aplicarEscopo, aplicarRazao, calcularRazao } from '../lib/util'
 import type { PreviewSide } from '../types'
 
-/** Props do painel lado a lado. */
-export interface SideBySideProps {
-  /** HTML sanitizado do capítulo original. */
-  htmlOriginal: string
-  /** HTML sanitizado do capítulo traduzido. */
-  htmlTraduzido: string
-  /** CSS do próprio EPUB (injetado e escopado dentro dos painéis). */
-  css?: string
-  /** `true` enquanto os previews estão sendo carregados. */
-  carregando?: boolean
-  /** Mensagem de erro a mostrar no lugar do preview. */
-  erro?: string | null
-}
 
 /** Classe CSS usada como raiz do escopo do CSS do EPUB. */
 const RAIZ_ORIGINAL = 'preview-raiz-original'
@@ -45,11 +35,13 @@ const RAIZ_TRADUZIDO = 'preview-raiz-traduzido'
 
 /** Classe (definida em index.css) do parágrafo destacado. */
 const CLASSE_DESTACADO = 'bloco-destacado'
+/** Classe (definida em index.css) do bloco em tradução. */
+const CLASSE_ATUAL = 'bloco-atual'
 
 /** Cor de texto do tema (fundo escuro). */
-const COR_TEXTO = '#e5edf5'
+const COR_TEXTO = '#dde2e8'
 /** Cor de texto sobre fundos claros do livro (ex.: caixas de comentário). */
-const COR_TEXTO_ESCURO = '#0b0f14'
+const COR_TEXTO_ESCURO = '#0f1114'
 
 /** Contraste mínimo aceito entre texto e fundo (abaixo disso, corrigimos). */
 const CONTRASTE_MINIMO = 0.4
@@ -116,7 +108,7 @@ function fundoEfetivo(elemento: HTMLElement, raiz: HTMLElement): Cor {
     }
     atual = atual.parentElement
   }
-  return { r: 11, g: 15, b: 20, a: 1 }
+  return { r: 15, g: 17, b: 20, a: 1 }
 }
 
 /**
@@ -132,8 +124,8 @@ function fundoEfetivo(elemento: HTMLElement, raiz: HTMLElement): Cor {
 function ajustarLegibilidade(raiz: HTMLElement): void {
   const estiloRaiz = window.getComputedStyle(raiz)
   const corDoPainel = lerCor(estiloRaiz.backgroundColor) ?? {
-    r: 11,
-    g: 15,
+    r: 15,
+    g: 17,
     b: 20,
     a: 1,
   }
@@ -160,95 +152,156 @@ function ajustarLegibilidade(raiz: HTMLElement): void {
 
 /** Props do painel interno (um dos lados). */
 interface PainelProps {
+  /** Capítulo exibido: trocar de capítulo recria o conteúdo do zero. */
+  chave: string
   /** HTML sanitizado do capítulo. */
   html: string
   /** CSS do EPUB já escopado nesta raiz. */
   css: string
-  /** Rótulo do painel ("Original" / "Traduzido"). */
+  /** Rótulo do painel ("Original" / "Tradução"). */
   rotulo: string
+  /** Detalhe à direita do rótulo (ex.: "3 pendentes"). */
+  detalhe?: string
   /** Lado do preview. */
   lado: PreviewSide
   /** Índice do bloco destacado (1-based) ou `null`. */
   blocoAtivo: number | null
+  /** Bloco sendo traduzido agora (1-based) ou `null`. */
+  blocoAtual: number | null
   /** Avisa o destaque de parágrafo. */
   aoDestacar: (indice: number | null) => void
   /** Avisa a rolagem deste painel. */
   aoRolar: (evento: UIEvent<HTMLDivElement>) => void
   /** Elemento com rolagem (o pai sincroniza os dois). */
   refPainel: RefObject<HTMLDivElement>
+  /** Mapa índice → elemento, exposto ao pai (para "ir até o bloco"). */
+  refMapa: { current: Map<number, HTMLElement> }
   /** Mensagem exibida quando não há conteúdo. */
   vazio: string
+  /** O usuário rolou com a roda/teclado (desliga o "seguir"). */
+  aoRolarManual?: () => void
 }
 
-/** Um dos dois painéis do preview. */
+/**
+ * Um dos dois painéis do preview.
+ *
+ * O conteúdo é aplicado **por bloco**: quando chega um HTML novo do MESMO
+ * capítulo (atualização em tempo real), só os elementos `data-block-index`
+ * cujo HTML mudou são trocados. O resto do DOM — e portanto a rolagem — fica
+ * intacto. Só uma troca de capítulo (ou de estrutura) recria tudo.
+ */
 function Painel({
+  chave,
   html,
   css,
   rotulo,
+  detalhe,
   lado,
   blocoAtivo,
+  blocoAtual,
   aoDestacar,
   aoRolar,
   refPainel,
+  refMapa,
   vazio,
+  aoRolarManual,
 }: PainelProps): ReactElement {
-  /** Índice do bloco → elemento do DOM (montado a cada HTML novo). */
-  const mapa = useRef<Map<number, HTMLElement>>(new Map())
-  /** Elemento atualmente destacado (para remover a classe). */
+  /** Elementos atualmente marcados (para remover as classes). */
   const destacado = useRef<HTMLElement | null>(null)
-  /** Raiz do conteúdo injetado (para o ajuste de legibilidade). */
-  const refRaiz = useRef<HTMLDivElement | null>(null)
+  const marcadoAtual = useRef<HTMLElement | null>(null)
+  /** Raiz do conteúdo injetado. */
+  const refConteudo = useRef<HTMLDivElement | null>(null)
+  /** HTML de origem de cada bloco na última aplicação (base da comparação). */
+  const fontes = useRef<Map<number, string>>(new Map())
+  /** Capítulo atualmente aplicado. */
+  const chaveAplicada = useRef<string | null>(null)
 
   const classeRaiz = lado === 'original' ? RAIZ_ORIGINAL : RAIZ_TRADUZIDO
 
-  // (1) HTML novo: monta o mapa índice → elemento e ajusta a legibilidade.
+  // (1) HTML novo: aplica (inteiro ou por bloco) e remonta o mapa.
   useEffect(() => {
-    const raiz = refRaiz.current
-    mapa.current = new Map()
-    destacado.current = null
+    const raiz = refConteudo.current
     if (!raiz) {
       return
     }
-    raiz.querySelectorAll<HTMLElement>('[data-block-index]').forEach((elemento) => {
-      const indice = Number(elemento.getAttribute('data-block-index'))
-      if (!Number.isFinite(indice)) {
-        return
+
+    const modelo = document.createElement('template')
+    modelo.innerHTML = html
+    const novos = Array.from(modelo.content.querySelectorAll<HTMLElement>('[data-block-index]'))
+    const indiceDe = (el: Element): number => Number(el.getAttribute('data-block-index'))
+
+    const mesmaEstrutura =
+      chaveAplicada.current === chave &&
+      html.length > 0 &&
+      novos.length === fontes.current.size &&
+      novos.every((el) => fontes.current.has(indiceDe(el)))
+
+    if (!mesmaEstrutura) {
+      // Capítulo novo (ou estrutura diferente): recria, preservando a rolagem.
+      const painel = refPainel.current
+      const topo = painel?.scrollTop ?? 0
+      raiz.innerHTML = html
+      if (painel && chaveAplicada.current === chave) {
+        painel.scrollTop = topo
       }
-      mapa.current.set(indice, elemento)
+      fontes.current = new Map(novos.map((el) => [indiceDe(el), el.outerHTML]))
+      chaveAplicada.current = chave
+    } else {
+      // Mesmo capítulo: troca só os blocos que mudaram.
+      const atuais = new Map<number, HTMLElement>()
+      raiz.querySelectorAll<HTMLElement>('[data-block-index]').forEach((el) => {
+        atuais.set(indiceDe(el), el)
+      })
+      for (const novo of novos) {
+        const indice = indiceDe(novo)
+        const fonte = novo.outerHTML
+        if (fontes.current.get(indice) === fonte) {
+          continue
+        }
+        const antigo = atuais.get(indice)
+        if (!antigo || !antigo.isConnected) {
+          continue
+        }
+        const chegouTraducao = antigo.hasAttribute('data-pending') && !novo.hasAttribute('data-pending')
+        const copia = novo.cloneNode(true) as HTMLElement
+        if (chegouTraducao) {
+          copia.classList.add('bloco-novo')
+        }
+        antigo.replaceWith(copia)
+        fontes.current.set(indice, fonte)
+      }
+    }
+
+    refMapa.current = new Map()
+    raiz.querySelectorAll<HTMLElement>('[data-block-index]').forEach((el) => {
+      const indice = indiceDe(el)
+      if (Number.isFinite(indice)) {
+        refMapa.current.set(indice, el)
+      }
     })
+    destacado.current = null
+    marcadoAtual.current = null
     ajustarLegibilidade(raiz)
-  }, [html, css])
+  }, [html, css, chave, refMapa, refPainel])
 
-  // (2) Destaque: marca o bloco ativo neste painel.
+  // (2) Destaque e bloco atual: classes nos elementos deste painel.
   useEffect(() => {
-    if (destacado.current) {
-      destacado.current.classList.remove(CLASSE_DESTACADO)
-      destacado.current = null
-    }
-    if (blocoAtivo === null) {
-      return
-    }
-    const elemento = mapa.current.get(blocoAtivo)
-    if (elemento) {
-      elemento.classList.add(CLASSE_DESTACADO)
-      destacado.current = elemento
-    }
-  }, [blocoAtivo, html])
+    destacado.current?.classList.remove(CLASSE_DESTACADO)
+    destacado.current = blocoAtivo === null ? null : refMapa.current.get(blocoAtivo) ?? null
+    destacado.current?.classList.add(CLASSE_DESTACADO)
 
-  // (3) Eventos de mouse: delegates no container (o HTML é injetado, o React
-  //     não conhece os elementos dentro dele).
-  const blocoDoEvento = useCallback(
-    (evento: ReactMouseEvent<HTMLDivElement>): HTMLElement | null => {
-      const alvo = evento.target
-      if (!(alvo instanceof Element)) {
-        return null
-      }
-      return alvo.closest('[data-block-index]')
-    },
-    [],
-  )
+    marcadoAtual.current?.classList.remove(CLASSE_ATUAL)
+    marcadoAtual.current = blocoAtual === null ? null : refMapa.current.get(blocoAtual) ?? null
+    marcadoAtual.current?.classList.add(CLASSE_ATUAL)
+  }, [blocoAtivo, blocoAtual, html, refMapa])
 
-  const indiceDoBloco = useCallback((bloco: HTMLElement | null): number | null => {
+  // (3) Eventos de mouse: delegados no container (o HTML é injetado).
+  const indiceDoEvento = useCallback((evento: ReactMouseEvent<HTMLDivElement>): number | null => {
+    const alvo = evento.target
+    if (!(alvo instanceof Element)) {
+      return null
+    }
+    const bloco = alvo.closest('[data-block-index]')
     if (!bloco) {
       return null
     }
@@ -256,92 +309,99 @@ function Painel({
     return Number.isFinite(indice) ? indice : null
   }, [])
 
-  const aoPassarMouse = useCallback(
-    (evento: ReactMouseEvent<HTMLDivElement>): void => {
-      const indice = indiceDoBloco(blocoDoEvento(evento))
-      if (indice !== null) {
-        aoDestacar(indice)
-      }
-    },
-    [aoDestacar, blocoDoEvento, indiceDoBloco],
-  )
-
-  const aoSairDoMouse = useCallback(
-    (evento: ReactMouseEvent<HTMLDivElement>): void => {
-      const bloco = blocoDoEvento(evento)
-      if (!bloco) {
-        return
-      }
-      const destino = evento.relatedTarget
-      if (destino instanceof Element && bloco.contains(destino)) {
-        // Saiu de um elemento interno, mas continua dentro do mesmo parágrafo.
-        return
-      }
-      aoDestacar(null)
-    },
-    [aoDestacar, blocoDoEvento],
-  )
-
-  const aoClicar = useCallback(
-    (evento: ReactMouseEvent<HTMLDivElement>): void => {
-      // O preview é somente leitura: links do livro não devem navegar.
-      if (evento.target instanceof Element && evento.target.closest('a')) {
-        evento.preventDefault()
-      }
-      const indice = indiceDoBloco(blocoDoEvento(evento))
-      if (indice !== null) {
-        aoDestacar(indice)
-      }
-    },
-    [aoDestacar, blocoDoEvento, indiceDoBloco],
-  )
-
   return (
-    <section className="flex min-w-0 flex-col">
-      <header className="mb-2 flex items-baseline justify-between gap-2">
-        <h3 className="text-sm font-semibold text-texto">{rotulo}</h3>
-        <span className="text-xs uppercase tracking-wide text-suave">
-          {lado === 'original' ? 'texto de origem' : 'tradução'}
-        </span>
+    <section className="flex min-h-0 min-w-0 flex-col">
+      <header className="flex h-9 shrink-0 items-center justify-between gap-2 border-b border-borda px-4">
+        <h3 className="painel-titulo">{rotulo}</h3>
+        {detalhe && <span className="num text-[11px] text-suave">{detalhe}</span>}
       </header>
 
       <div
         ref={refPainel}
         onScroll={aoRolar}
-        onMouseOver={aoPassarMouse}
-        onMouseOut={aoSairDoMouse}
-        onClick={aoClicar}
-        className="h-[60vh] overflow-y-auto overscroll-contain rounded-lg border border-borda bg-fundo p-4"
+        onWheel={aoRolarManual}
+        onKeyDown={(evento) => {
+          if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(evento.key)) {
+            aoRolarManual?.()
+          }
+        }}
+        tabIndex={0}
+        onMouseOver={(evento) => {
+          const indice = indiceDoEvento(evento)
+          if (indice !== null) {
+            aoDestacar(indice)
+          }
+        }}
+        onMouseLeave={() => aoDestacar(null)}
+        onClick={(evento) => {
+          // O preview é somente leitura: links do livro não devem navegar.
+          if (evento.target instanceof Element && evento.target.closest('a')) {
+            evento.preventDefault()
+          }
+        }}
+        className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
       >
         {/* CSS do próprio EPUB, com os seletores escopados neste painel. */}
         <style>{css}</style>
-        <div
-          ref={refRaiz}
-          className={`${classeRaiz} mx-auto max-w-2xl px-1 py-2 font-serif leading-relaxed text-texto`}
-        >
-          {html.length > 0 ? (
-            <div dangerouslySetInnerHTML={{ __html: html }} />
-          ) : (
-            <p className="py-6 text-center text-sm text-suave">{vazio}</p>
-          )}
+        <div className={`${classeRaiz} mx-auto max-w-[68ch] px-6 py-5 font-serif text-[15px] leading-[1.7] text-texto`}>
+          <div ref={refConteudo} />
+          {html.length === 0 && <p className="py-8 text-center font-sans text-sm text-suave">{vazio}</p>}
         </div>
       </div>
     </section>
   )
 }
 
+/** Props do preview lado a lado. */
+export interface SideBySideProps {
+  /** Caminho do capítulo exibido (trocar recria o conteúdo). */
+  capitulo: string
+  /** HTML sanitizado do capítulo original. */
+  htmlOriginal: string
+  /** HTML sanitizado do capítulo traduzido. */
+  htmlTraduzido: string
+  /** CSS do próprio EPUB (injetado e escopado dentro dos painéis). */
+  css?: string
+  /** `true` enquanto o capítulo está sendo carregado pela primeira vez. */
+  carregando?: boolean
+  /** Mensagem de erro a mostrar no lugar do preview. */
+  erro?: string | null
+  /** Bloco sendo traduzido agora neste capítulo (1-based) ou `null`. */
+  blocoAtual?: number | null
+  /** Pedido para levar a vista até um bloco (`n` muda a cada pedido). */
+  irPara?: { indice: number; n: number; suave?: boolean } | null
+  /** Blocos ainda sem tradução neste capítulo. */
+  pendentes?: number
+  /** O usuário rolou à mão um dos painéis. */
+  aoRolarManual?: () => void
+  /** `true` enquanto a tradução roda (pendente não é falha). */
+  rodando?: boolean
+  /** Job concluído: só aí o que falta aparece como falha (vermelho). */
+  concluido?: boolean
+}
+
 /**
- * Preview lado a lado do capítulo: original à esquerda, traduzido à direita.
+ * Preview lado a lado do capítulo: original à esquerda, tradução à direita,
+ * com rolagem sincronizada e atualização ao vivo por bloco.
  */
 export default function SideBySide({
+  capitulo,
   htmlOriginal,
   htmlTraduzido,
   css = '',
   carregando = false,
   erro = null,
+  blocoAtual = null,
+  irPara = null,
+  pendentes = 0,
+  aoRolarManual,
+  rodando = false,
+  concluido = false,
 }: SideBySideProps): ReactElement {
   const refOriginal = useRef<HTMLDivElement | null>(null)
   const refTraduzido = useRef<HTMLDivElement | null>(null)
+  const mapaOriginal = useRef<Map<number, HTMLElement>>(new Map())
+  const mapaTraduzido = useRef<Map<number, HTMLElement>>(new Map())
   const [blocoAtivo, setBlocoAtivo] = useState<number | null>(null)
 
   /** Guarda de loop: `true` enquanto uma sincronização está em andamento. */
@@ -349,22 +409,12 @@ export default function SideBySide({
   /** Marca da última sincronização (proteção extra contra loop). */
   const ultima = useRef<{ alvo: HTMLElement; razao: number } | null>(null)
 
-  const cssOriginal = useMemo(
-    () => aplicarEscopo(css, `.${RAIZ_ORIGINAL}`),
-    [css],
-  )
-  const cssTraduzido = useMemo(
-    () => aplicarEscopo(css, `.${RAIZ_TRADUZIDO}`),
-    [css],
-  )
+  const cssOriginal = useMemo(() => aplicarEscopo(css, `.${RAIZ_ORIGINAL}`), [css])
+  const cssTraduzido = useMemo(() => aplicarEscopo(css, `.${RAIZ_TRADUZIDO}`), [css])
 
   /**
-   * Copia a **razão** de rolagem da origem para o destino.
-   *
-   * O `scrollTop` cru nunca é copiado: as duas colunas têm alturas diferentes
-   * e isso desalinha o texto. A guarda `sincronizando` impede o laço (o
-   * scroll programático do destino dispara um evento de scroll que chamaria
-   * a sincronização de novo).
+   * Copia a **razão** de rolagem da origem para o destino (o `scrollTop` cru
+   * desalinharia: as colunas têm alturas diferentes). A guarda impede o laço.
    */
   const sincronizar = useCallback((origem: HTMLElement, destino: HTMLElement | null): void => {
     if (!destino || sincronizando.current) {
@@ -374,24 +424,16 @@ export default function SideBySide({
     if (razao === null) {
       return
     }
-
     sincronizando.current = true
     ultima.current = { alvo: destino, razao }
-
     requestAnimationFrame(() => {
       aplicarRazao(destino, razao)
-      // A guarda só é liberada no frame seguinte: o evento de scroll do
-      // destino é disparado nesse frame e precisa ser ignorado.
       requestAnimationFrame(() => {
         sincronizando.current = false
       })
     })
   }, [])
 
-  /**
-   * Treata a rolagem de um painel: se o evento não foi provocado por nós,
-   * sincroniza o outro painel pela razão.
-   */
   const aoRolar = useCallback(
     (evento: UIEvent<HTMLDivElement>, destino: HTMLElement | null): void => {
       const elemento = evento.currentTarget
@@ -400,13 +442,8 @@ export default function SideBySide({
       }
       const marca = ultima.current
       if (marca && marca.alvo === elemento) {
-        const razaoAtual = calcularRazao(
-          elemento.scrollTop,
-          elemento.scrollHeight,
-          elemento.clientHeight,
-        )
+        const razaoAtual = calcularRazao(elemento.scrollTop, elemento.scrollHeight, elemento.clientHeight)
         if (razaoAtual !== null && Math.abs(razaoAtual - marca.razao) < 0.005) {
-          // É o scroll que nós mesmos provocamos: ignora.
           return
         }
       }
@@ -415,62 +452,92 @@ export default function SideBySide({
     [sincronizar],
   )
 
-  const aoRolarOriginal = useCallback(
-    (evento: UIEvent<HTMLDivElement>): void => {
-      aoRolar(evento, refTraduzido.current)
-    },
-    [aoRolar],
-  )
-
-  const aoRolarTraduzido = useCallback(
-    (evento: UIEvent<HTMLDivElement>): void => {
-      aoRolar(evento, refOriginal.current)
-    },
-    [aoRolar],
-  )
-
   // Capítulo novo: o destaque antigo não faz sentido.
   useEffect(() => {
     setBlocoAtivo(null)
-  }, [htmlOriginal, htmlTraduzido])
+  }, [capitulo])
+
+  // "Ir até o bloco": centraliza o bloco nos dois painéis — UMA vez por
+  // pedido. Espera o capítulo carregar, mas as atualizações ao vivo seguintes
+  // não voltam a rolar a vista.
+  const pedidoAplicado = useRef<number | null>(null)
+  useEffect(() => {
+    if (!irPara || pedidoAplicado.current === irPara.n) {
+      return
+    }
+    const quadro = requestAnimationFrame(() => {
+      let aplicou = false
+      for (const [painel, mapa] of [
+        [refOriginal.current, mapaOriginal.current],
+        [refTraduzido.current, mapaTraduzido.current],
+      ] as const) {
+        const alvo = mapa.get(irPara.indice)
+        if (painel && alvo) {
+          // Posição relativa ao PAINEL (offsetTop mediria a partir do ancestral
+          // posicionado mais próximo, fora do painel com rolagem).
+          const deslocamento =
+            alvo.getBoundingClientRect().top - painel.getBoundingClientRect().top + painel.scrollTop
+          painel.scrollTo({
+            top: deslocamento - painel.clientHeight / 2 + alvo.offsetHeight / 2,
+            behavior: irPara.suave ? 'smooth' : 'auto',
+          })
+          aplicou = true
+        }
+      }
+      if (aplicou) {
+        pedidoAplicado.current = irPara.n
+        if (!irPara.suave) {
+          setBlocoAtivo(irPara.indice)
+        }
+      }
+    })
+    return () => cancelAnimationFrame(quadro)
+  }, [irPara, htmlOriginal, htmlTraduzido])
 
   if (erro) {
-    return (
-      <div className="rounded-lg border border-erro/40 bg-surface p-4 text-sm text-erro">{erro}</div>
-    )
+    return <div className="p-6 text-sm text-erro">{erro}</div>
   }
 
   if (carregando && htmlOriginal.length === 0 && htmlTraduzido.length === 0) {
-    return (
-      <div className="rounded-lg border border-borda bg-surface p-6 text-center text-sm text-suave">
-        Carregando o capítulo…
-      </div>
-    )
+    return <div className="p-6 text-sm text-suave">Carregando o capítulo…</div>
   }
 
   return (
-    <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+    <div className={`grid h-full min-h-0 grid-cols-2 divide-x divide-borda ${rodando ? 'preview-rodando' : ''} ${concluido ? 'preview-concluido' : ''}`}>
       <Painel
+        chave={capitulo}
         html={htmlOriginal}
         css={cssOriginal}
         rotulo="Original"
         lado="original"
         blocoAtivo={blocoAtivo}
+        blocoAtual={blocoAtual}
         aoDestacar={setBlocoAtivo}
-        aoRolar={aoRolarOriginal}
+        aoRolar={(evento) => aoRolar(evento, refTraduzido.current)}
         refPainel={refOriginal}
-        vazio="Sem conteúdo original para este capítulo."
+        refMapa={mapaOriginal}
+        aoRolarManual={aoRolarManual}
+        vazio="Este capítulo não tem texto."
       />
       <Painel
+        chave={capitulo}
         html={htmlTraduzido}
         css={cssTraduzido}
-        rotulo="Traduzido"
+        rotulo="Tradução"
+        detalhe={
+          pendentes > 0
+            ? `${pendentes} ${rodando ? 'por traduzir' : concluido ? 'sem tradução' : 'não traduzidos'}`
+            : undefined
+        }
         lado="translated"
         blocoAtivo={blocoAtivo}
+        blocoAtual={blocoAtual}
         aoDestacar={setBlocoAtivo}
-        aoRolar={aoRolarTraduzido}
+        aoRolar={(evento) => aoRolar(evento, refOriginal.current)}
         refPainel={refTraduzido}
-        vazio="Sem tradução para este capítulo (ainda não traduzido?)."
+        refMapa={mapaTraduzido}
+        aoRolarManual={aoRolarManual}
+        vazio="Ainda sem tradução para este capítulo."
       />
     </div>
   )

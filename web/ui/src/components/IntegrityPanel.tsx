@@ -26,52 +26,43 @@ export default function IntegrityPanel({
   carregando = false,
 }: IntegrityPanelProps): ReactElement {
   const falhas = itens.filter((item) => !item.ok).length
-  const titulo = itens.length > 0 ? `Integridade (${itens.length - falhas}/${itens.length} OK)` : 'Integridade'
+  const titulo = `${itens.length - falhas}/${itens.length} verificações OK`
 
   return (
-    <section className="rounded-lg border border-borda bg-surface p-4">
-      <div className="mb-3 flex items-baseline justify-between gap-2">
-        <h2 className="text-sm font-semibold text-texto">{titulo}</h2>
-        {itens.length > 0 && (
-          <span className={`text-xs ${falhas > 0 ? 'text-erro' : 'text-sucesso'}`}>
-            {falhas > 0 ? `${falhas} ${falhas === 1 ? 'falha' : 'falhas'}` : 'todas OK'}
-          </span>
-        )}
-      </div>
-
+    <section className="px-5 py-3">
       {carregando && itens.length === 0 && (
-        <p className="text-sm text-suave">Verificando a integridade do EPUB…</p>
+        <p className="text-suave">Verificando a integridade do EPUB…</p>
       )}
 
       {!carregando && itens.length === 0 && (
-        <p className="text-sm text-suave">
-          A verificação de integridade roda no final da tradução.
-        </p>
+        <p className="text-suave">A verificação de integridade roda no fim da tradução.</p>
       )}
 
       {itens.length > 0 && (
-        <ul className="space-y-2">
-          {itens.map((item, indice) => (
-            <li
-              key={`${item.item}-${indice}`}
-              className="rounded-md border border-borda/70 bg-fundo px-3 py-2"
-            >
-              <div className="flex items-start gap-2">
+        <>
+          <p className={`mb-2 ${falhas > 0 ? 'text-erro' : 'text-sucesso'}`}>
+            {titulo} — {falhas > 0 ? `${falhas} ${falhas === 1 ? 'falha' : 'falhas'}` : 'tudo certo'}
+          </p>
+          <ul className="grid grid-cols-1 gap-x-8 xl:grid-cols-2">
+            {itens.map((item, indice) => (
+              <li key={`${item.item}-${indice}`} className="flex gap-3 border-b border-borda/60 py-1.5">
                 <span
-                  className={`mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
-                    item.ok ? 'bg-sucesso/15 text-sucesso' : 'bg-erro/15 text-erro'
-                  }`}
+                  className={`num w-10 shrink-0 font-mono text-[11px] ${item.ok ? 'text-sucesso' : 'text-erro'}`}
                 >
-                  {item.ok ? 'OK' : 'Falha'}
+                  {item.ok ? 'OK' : 'FALHA'}
                 </span>
-                <span className="min-w-0 flex-1 text-sm text-texto">{item.item}</span>
-              </div>
-              {item.detail && item.detail.length > 0 && (
-                <p className="mt-1 pl-1 text-xs leading-relaxed text-suave">{item.detail}</p>
-              )}
-            </li>
-          ))}
-        </ul>
+                <span className="min-w-0 flex-1">
+                  <span className="text-texto">{item.item}</span>
+                  {item.detail && item.detail.length > 0 && (
+                    <span className="block truncate font-mono text-[11px] text-suave" title={item.detail}>
+                      {item.detail}
+                    </span>
+                  )}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </>
       )}
     </section>
   )

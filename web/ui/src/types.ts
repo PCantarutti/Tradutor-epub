@@ -128,6 +128,10 @@ export interface Chapter {
   path: string
   title: string
   blocks: number
+  /** Blocos ainda sem tradução no cache (falharam ou não foram traduzidos). */
+  pending?: number
+  /** Um caractere por bloco: "1" = já traduzido no cache. */
+  mask?: string
 }
 
 /** Resposta de `POST /api/providers/models`. */
@@ -176,4 +180,6 @@ export interface ControlResponse {
 /** Resposta de `GET /api/jobs/{id}/log`. */
 export interface LogResponse {
   text: string
+  /** Tamanho do log em bytes: passe-o na próxima chamada. */
+  offset: number
 }

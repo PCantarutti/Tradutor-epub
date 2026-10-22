@@ -100,9 +100,25 @@ export async function pausarJob(jobId: string): Promise<ControlResponse> {
   return pedir<ControlResponse>(`/jobs/${encodeURIComponent(jobId)}/pause`, { method: 'POST' })
 }
 
-/** Retoma a tradução a partir do cache. */
-export async function retomarJob(jobId: string): Promise<ControlResponse> {
-  return pedir<ControlResponse>(`/jobs/${encodeURIComponent(jobId)}/resume`, { method: 'POST' })
+/** Lista os jobs já criados (do mais recente ao mais antigo). */
+export async function listarJobs(): Promise<JobSnapshot[]> {
+  return pedir<JobSnapshot[]>('/jobs')
+}
+
+/**
+ * Retoma a tradução a partir do cache — os blocos já traduzidos voltam do
+ * cache e só os que faltam (inclusive os que falharam) vão ao modelo.
+ *
+ * `apiKey` só é necessária quando o servidor foi reiniciado: a chave real
+ * não é gravada no disco.
+ */
+export async function retomarJob(jobId: string, apiKey?: string): Promise<ControlResponse> {
+  const init: RequestInit = { method: 'POST' }
+  if (apiKey) {
+    init.headers = { 'Content-Type': 'application/json' }
+    init.body = JSON.stringify({ api_key: apiKey })
+  }
+  return pedir<ControlResponse>(`/jobs/${encodeURIComponent(jobId)}/resume`, init)
 }
 
 /** Cancela a tradução. */
@@ -134,8 +150,9 @@ export async function buscarPreview(
 }
 
 /** Log textual do job. */
-export async function buscarLog(jobId: string): Promise<LogResponse> {
-  return pedir<LogResponse>(`/jobs/${encodeURIComponent(jobId)}/log`)
+/** Log do job a partir do byte `offset` (só as linhas novas). */
+export async function buscarLog(jobId: string, offset = 0): Promise<LogResponse> {
+  return pedir<LogResponse>(`/jobs/${encodeURIComponent(jobId)}/log?offset=${offset}`)
 }
 
 /** Baixa o EPUB traduzido como arquivo. */

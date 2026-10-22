@@ -78,6 +78,7 @@ from web.jobs import (  # noqa: E402
     fechar_logs,
     gerenciador_padrao,
 )
+from web.fila import Fila, ItemFila, nome_traduzido, rodar_fila  # noqa: E402
 from web.preview import html_preview, listar_capitulos  # noqa: E402
 
 
@@ -541,6 +542,12 @@ async def criar_job(
     return {"job_id": job.id, "state": job.state}
 
 
+@app.get("/api/jobs")
+def listar_jobs(manager: JobManager = Depends(obter_gerenciador)) -> list[dict[str, Any]]:
+    """Jobs já criados (memória + disco), do mais recente ao mais antigo."""
+    return [manager.snapshot(job) for job in manager.listar()]
+
+
 @app.get("/api/jobs/{job_id}")
 def obter_job(
     job_id: str, manager: JobManager = Depends(obter_gerenciador)
@@ -666,7 +673,19 @@ def capitulos_do_job(
     """Lista os capítulos do EPUB, na ordem do spine."""
     job = _obter_job(job_id, manager)
     data = _dados_do_job(job)
-    return listar_capitulos(data)
+    capitulos = listar_capitulos(data)
+    # "pending": blocos ainda sem tradução no cache (falharam ou não chegaram
+    # a ser traduzidos) — é o que "Retraduzir falhas" vai refazer.
+    for capitulo in capitulos:
+        traduzidos = _traducoes_do_capitulo(job, data, capitulo["path"])
+        capitulo["pending"] = max(capitulo["blocks"] - len(traduzidos), 0)
+        # "mask": um caractere por bloco ("1" = já traduzido no cache) — a UI
+        # desenha o campo de barras do progresso a partir dele.
+        capitulo["mask"] = "".join(
+            "1" if indice in traduzidos else "0"
+            for indice in range(1, capitulo["blocks"] + 1)
+        )
+    return capitulos
 
 
 @app.get("/api/jobs/{job_id}/preview")
@@ -740,18 +759,27 @@ def css_do_epub(
 
 @app.get("/api/jobs/{job_id}/log")
 def log_do_job(
-    job_id: str, manager: JobManager = Depends(obter_gerenciador)
+    job_id: str,
+    offset: int = 0,
+    manager: JobManager = Depends(obter_gerenciador),
 ) -> dict[str, Any]:
-    """Conteúdo do arquivo de log do job."""
+    """Conteúdo do log do job a partir do byte ``offset``.
+
+    Devolve ``{"text": ..., "offset": <tamanho em bytes>}``: a UI passa o
+    ``offset`` recebido na próxima chamada e só recebe as linhas novas (log em
+    tempo real sem reenviar o arquivo inteiro). Um ``offset`` maior que o
+    arquivo (log recriado) recomeça do início.
+    """
     job = _obter_job(job_id, manager)
 
-    texto = ""
     try:
-        texto = Path(job.log_path).read_text(encoding="utf-8", errors="replace")
+        bruto = Path(job.log_path).read_bytes()
     except OSError:
-        texto = ""
+        bruto = b""
 
-    return {"text": texto}
+    inicio = offset if 0 <= offset <= len(bruto) else 0
+    texto = bruto[inicio:].decode("utf-8", errors="replace")
+    return {"text": texto, "offset": len(bruto)}
 
 
 @app.get("/api/jobs/{job_id}/integrity")
@@ -761,6 +789,57 @@ def integridade_do_job(
     """Itens da verificação de integridade do EPUB gerado."""
     job = _obter_job(job_id, manager)
     return list(job.integrity)
+
+
+# ── Fila de tradução (vários livros em sequência) ──────────────────────────
+
+_fila: Fila | None = None
+
+
+@app.post("/api/queue")
+def criar_fila(
+    payload: dict[str, Any], manager: JobManager = Depends(obter_gerenciador)
+) -> dict[str, Any]:
+    """Traduz vários EPUBs (caminhos locais), um depois do outro.
+
+    Body: ``{"paths": [...], "dest_dir": str, "config": {...},
+    "glossary_file": str?, "retry_rounds": int?}``. Cada EPUB pronto é
+    copiado para ``dest_dir``. Só uma fila por vez.
+    """
+    global _fila
+    import threading
+
+    if _fila is not None and _fila.estado == "rodando":
+        raise HTTPException(status_code=409, detail="Já existe uma fila rodando.")
+
+    caminhos = [str(p) for p in payload.get("paths") or []]
+    faltando = [p for p in caminhos if not Path(p).is_file()]
+    if not caminhos or faltando:
+        raise HTTPException(status_code=400, detail=f"EPUBs não encontrados: {faltando or 'nenhum caminho'}")
+    destino = str(payload.get("dest_dir") or "")
+    if not destino:
+        raise HTTPException(status_code=400, detail="Informe dest_dir.")
+
+    config = dict(payload.get("config") or {})
+    arquivo_glossario = payload.get("glossary_file")
+    if arquivo_glossario and not config.get("glossary"):
+        config["glossary"] = json.loads(Path(arquivo_glossario).read_text(encoding="utf-8"))
+
+    _fila = Fila(
+        itens=[ItemFila(origem=p, nome_saida=nome_traduzido(p)) for p in caminhos],
+        destino=destino,
+        rodadas_extras=int(payload.get("retry_rounds", 2)),
+    )
+    thread = threading.Thread(target=rodar_fila, args=(_fila, manager, config), daemon=True)
+    _fila._thread = thread
+    thread.start()
+    return _fila.resumo()
+
+
+@app.get("/api/queue")
+def estado_da_fila() -> dict[str, Any]:
+    """Situação da fila atual (ou ``{"estado": "vazia"}``)."""
+    return _fila.resumo() if _fila is not None else {"estado": "vazia", "itens": []}
 
 
 @app.get("/api/health")

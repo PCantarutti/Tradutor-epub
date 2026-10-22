@@ -221,13 +221,15 @@ def test_html_preview_traducoes_incompletas_mantem_o_original(
 def test_html_preview_aceita_ausencia_de_traducoes(
     data_validacao: EpubReader,
 ) -> None:
-    """Sem traduções, o lado traduzido é igual ao original."""
+    """Sem traduções, o lado traduzido é o original com os blocos marcados
+    como pendentes (``data-pending``)."""
     html_original = html_preview(data_validacao, CAPITULO_VALIDACAO, "original")
     html_traduzido = html_preview(
         data_validacao, CAPITULO_VALIDACAO, "translated"
     )
 
-    assert html_traduzido == html_original
+    assert 'data-pending="1"' in html_traduzido
+    assert html_traduzido.replace(' data-pending="1"', "") == html_original
 
 
 def test_html_preview_rejeita_lado_invalido(data_validacao: EpubReader) -> None:

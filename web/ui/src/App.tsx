@@ -1,41 +1,31 @@
 /**
- * App do Tradutor de EPUB (TASK-029).
+ * App do Tradutor de EPUB — console de acompanhamento.
  *
- * Integra os **sete componentes já prontos** de `src/components/`:
+ * Estrutura (tela cheia, painéis separados por linhas de 1px):
  *
- * 1. **Faixa 1 — cabeçalho**: nome do app, `ProviderSelector`, upload do
- *    `.epub` (botão "Traduzir"), upload do glossário e "Ver log".
- * 2. **Faixa 2 — progresso**: `ProgressBar` + `MetricsPanel` (só aparece
- *    quando há job ativo).
- * 3. **Faixa 3 — área principal**: `ChapterNav` + `SideBySide` +
- *    `IntegrityPanel`.
+ * - **Trilho** à esquerda: "Nova tradução", as traduções já feitas (reabrir
+ *   uma delas permite retraduzir só as falhas) e o provedor em uso.
+ * - **Instrumento** no topo do job: leitura numérica + campo de barras com um
+ *   traço por bloco do livro, ao vivo.
+ * - **Bancada**: capítulos à esquerda e o preview original × tradução, que se
+ *   atualiza bloco a bloco sem mexer na rolagem.
+ * - **Doca** inferior: log ao vivo, integridade e provedor.
  *
- * O estado chega pelo **SSE** (`GET /api/jobs/{id}/events`): cada evento é
- * acumulado num `useRef` e o React só é atualizado a cada ~100 ms
- * (*throttle*), para a barra não re-renderizar a 60 fps.
- *
- * Decisões:
- *
- * - O `EventSource` fica num `useRef` e é fechado no *cleanup* do `useEffect`
- *   (nada de conexão aberta depois do unmount).
- * - A pausa só tem efeito **entre lotes** (um lote leva ~90 s no LM Studio):
- *   por isso existe o estado "pausando…", que só vira "pausado" quando chega
- *   o evento `state: paused`.
- * - A `api_key` nunca é renderizada em texto puro (quem cuida disso é o
- *   `ProviderSelector`).
+ * O estado do job chega pelo SSE (`GET /api/jobs/{id}/events`), é acumulado
+ * num `useRef` e aplicado ao React no máximo a cada 100 ms.
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
-import type { ChangeEvent, ReactElement } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { ButtonHTMLAttributes, ChangeEvent, DragEvent, ReactElement, ReactNode } from 'react'
 
 import {
   baixarJob,
-  buscarLog,
   buscarPreview,
   cancelarJob,
   conectarEventos,
   criarJob,
   descartarCache,
   listarCapitulos,
+  listarJobs,
   obterJob,
   pausarJob,
   retomarJob,
@@ -46,78 +36,70 @@ import type {
   Chapter,
   IntegrityItem,
   JobConfig,
+  JobSnapshot,
   JobState,
-  LogResponse,
   ProviderConfig,
   Report,
   SseEvent,
 } from './types'
+import CampoDeBlocos from './components/CampoDeBlocos'
+import type { CapituloDoCampo, EstadoBloco } from './components/CampoDeBlocos'
 import ChapterNav from './components/ChapterNav'
+import type { ItemCapitulo } from './components/ChapterNav'
+import Icone from './components/Icone'
+import type { NomeIcone } from './components/Icone'
 import IntegrityPanel from './components/IntegrityPanel'
-import LogViewer from './components/LogViewer'
-import MetricsPanel from './components/MetricsPanel'
-import ProgressBar from './components/ProgressBar'
+import LogAoVivo from './components/LogAoVivo'
 import ProviderSelector from './components/ProviderSelector'
 import SideBySide from './components/SideBySide'
 
+/* ======================================================================== */
+/* Constantes                                                               */
+/* ======================================================================== */
+
 /** Intervalo mínimo entre duas atualizações do React (ms). */
 const INTERVALO_ATUALIZACAO_MS = 100
-
-/** Tamanho do lote enviado ao back-end (blocos por chamada ao modelo). */
+/** Intervalo mínimo entre duas recargas do preview ao vivo (ms). */
+const INTERVALO_PREVIEW_MS = 2500
+/** Blocos por chamada ao modelo. */
 const TAMANHO_LOTE = 5
-
-/** Temperatura da tradução (0 = determinístico, 1 = criativo). */
+/** Temperatura da tradução. */
 const TEMPERATURA = 0.25
-
 /** Idioma de destino. */
 const IDIOMA_DESTINO = 'pt-BR'
+/** Chave do localStorage onde o provedor (com a api_key) é lembrado. */
+const CHAVE_PROVEDOR_SALVO = 'tradutor-epub:provedor'
 
-/** Motivo pelo qual a interface está esperando um evento do back-end. */
 type MotivoEspera = 'pausa' | 'retomada'
+type AbaDoca = 'log' | 'integridade' | 'provedor'
 
-/** Estado do job mostrado na interface (espelho do acumulador do SSE). */
+/* ======================================================================== */
+/* Estado do job                                                            */
+/* ======================================================================== */
+
 interface EstadoJob {
-  /** Estado do job (running, paused, done, error, cancelled). */
   estado: JobState
-  /** Espera em andamento: pausa pedida ou retomada pedida. */
   aguardando: MotivoEspera | null
-  /** Mensagem de status (pausado, cancelado, concluído…). */
   mensagem: string | null
-  /** Mensagem de erro (em pt-BR). */
   erro: string | null
-  /** Total de blocos do livro. */
   total: number
-  /** Blocos já concluídos. */
   done: number
-  /** Blocos traduzidos pelo modelo. */
   translated: number
-  /** Blocos reusados do cache. */
   cached: number
-  /** Blocos que falharam. */
   failed: number
-  /** Blocos descartados. */
   discarded: number
-  /** Segundos decorridos. */
   elapsed_s: number
-  /** Estimativa de término (segundos) ou `null`. */
   eta_s: number | null
-  /** Arquivo (capítulo) em processamento. */
   arquivo: string | null
-  /** Bloco em processamento (1-based). */
   bloco: number | null
-  /** `detail` do último evento de cada status (tooltip dos contadores). */
   detalhes: Partial<Record<BlockStatus, string>>
-  /** Relatório final do tradutor. */
   relatorio: Report | null
-  /** Itens da verificação de integridade. */
   integridade: IntegrityItem[]
-  /** Nome do arquivo de saída. */
   nomeSaida: string | null
-  /** `true` quando o EPUB traduzido já existe no disco. */
   temSaida: boolean
+  modelo: string | null
 }
 
-/** Estado inicial do job (nada aconteceu ainda). */
 function estadoInicial(): EstadoJob {
   return {
     estado: 'running',
@@ -139,10 +121,35 @@ function estadoInicial(): EstadoJob {
     integridade: [],
     nomeSaida: null,
     temSaida: false,
+    modelo: null,
   }
 }
 
-/** Extrai uma mensagem em pt-BR de um erro qualquer. */
+/** Copia a fotografia do back-end para o acumulador do SSE. */
+function aplicarFotografia(atual: EstadoJob, foto: JobSnapshot): void {
+  atual.estado = foto.state
+  atual.total = foto.total
+  atual.done = foto.done
+  atual.translated = foto.translated
+  atual.cached = foto.cached
+  atual.failed = foto.failed
+  atual.discarded = foto.discarded
+  atual.elapsed_s = foto.elapsed_s
+  atual.eta_s = foto.eta_s
+  atual.arquivo = foto.current_file
+  atual.bloco = foto.current_block
+  atual.erro = foto.error
+  atual.relatorio = foto.report
+  atual.integridade = foto.integrity
+  atual.nomeSaida = foto.output_name
+  atual.temSaida = foto.has_output
+  atual.modelo = foto.model
+}
+
+/* ======================================================================== */
+/* Utilidades                                                               */
+/* ======================================================================== */
+
 function mensagemDeErro(falha: unknown, padrao: string): string {
   if (falha instanceof Error && falha.message && falha.message.length > 0) {
     return falha.message
@@ -151,40 +158,26 @@ function mensagemDeErro(falha: unknown, padrao: string): string {
 }
 
 /**
- * Converte o conteúdo de um glossário em `{termo: tradução}`.
- *
- * O parser é escolhido pelo **CONTEÚDO**, nunca pelo nome do arquivo: o
- * `File.name` pode vir como `C:\fakepath\glossario.json`, `glossario.txt`
- * ou de qualquer outra forma, e um JSON mal detectado viraria um glossário
- * vazio (ou cheio de lixo) no prompt do modelo.
- *
- * - **JSON**: `JSON.parse` é tentado primeiro (o objeto precisa ser
- *   `{termo: tradução}`).
- * - **YAML simples**: uma linha `termo: tradução` por linha; linhas vazias e
- *   comentários (`#`) são ignorados.
+ * Converte o conteúdo de um glossário em `{termo: tradução}`. O formato é
+ * reconhecido pelo CONTEÚDO (JSON primeiro, YAML simples como reserva),
+ * nunca pelo nome do arquivo.
  */
 function lerGlossario(conteudo: string): Record<string, string> {
   const termos: Record<string, string> = {}
-
-  // (1) JSON — tenta sempre primeiro, venha o arquivo de onde vier.
   try {
     const dados: unknown = JSON.parse(conteudo)
     if (dados && typeof dados === 'object' && !Array.isArray(dados)) {
       for (const [chave, valor] of Object.entries(dados as Record<string, unknown>)) {
         const termo = chave.trim()
-        if (termo.length === 0) {
-          continue
+        if (termo.length > 0) {
+          termos[termo] = String(valor)
         }
-        termos[termo] = String(valor)
       }
       return termos
     }
-    // JSON válido, mas não é um objeto (ex.: uma lista): cai no YAML.
   } catch {
     // Não é JSON: cai no parser YAML simples.
   }
-
-  // (2) YAML simples
   for (const linha of conteudo.split(/\r?\n/)) {
     const limpa = linha.trim()
     if (limpa.length === 0 || limpa.startsWith('#')) {
@@ -194,23 +187,15 @@ function lerGlossario(conteudo: string): Record<string, string> {
     if (separador <= 0) {
       continue
     }
-    const termo = limpa
-      .slice(0, separador)
-      .trim()
-      .replace(/^["']|["']$/g, '')
-    const traducao = limpa
-      .slice(separador + 1)
-      .trim()
-      .replace(/^["']|["']$/g, '')
-    if (termo.length === 0) {
-      continue
+    const termo = limpa.slice(0, separador).trim().replace(/^["']|["']$/g, '')
+    const traducao = limpa.slice(separador + 1).trim().replace(/^["']|["']$/g, '')
+    if (termo.length > 0) {
+      termos[termo] = traducao
     }
-    termos[termo] = traducao
   }
   return termos
 }
 
-/** Busca o CSS do próprio EPUB (usado no preview lado a lado). */
 async function buscarCssDoEpub(jobId: string): Promise<string> {
   const resposta = await fetch(urlDoStyle(jobId))
   if (!resposta.ok) {
@@ -219,96 +204,189 @@ async function buscarCssDoEpub(jobId: string): Promise<string> {
   return await resposta.text()
 }
 
-/** Classe Tailwind dos campos de formulário. */
+/** `hh:mm:ss`. */
+function relogio(segundos: number): string {
+  const s = Math.max(0, Math.round(segundos))
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  return [h, m, s % 60].map((n) => String(n).padStart(2, '0')).join(':')
+}
+
+const formatoNumero = new Intl.NumberFormat('pt-BR')
+const n = (valor: number): string => formatoNumero.format(valor)
+
+/** Nome legível do livro a partir do nome do arquivo de saída. */
+function nomeDoLivro(saida: string | null | undefined): string {
+  if (!saida) {
+    return 'Tradução'
+  }
+  return saida.replace(/\.epub$/i, '').replace(/\s*\(traduzido\)\s*$/i, '')
+}
+
+/** Separa o volume do título ("… Volume-16" → "Vol. 16"), para o trilho. */
+function partesDoNome(nome: string): { titulo: string; volume: string | null } {
+  const m = /[\s\-–—:,]*\b(?:vol(?:ume)?\.?)[\s\-]*(\d+)\b/i.exec(nome)
+  if (!m) {
+    return { titulo: nome, volume: null }
+  }
+  const titulo = (nome.slice(0, m.index) + nome.slice(m.index + m[0].length)).trim()
+  return { titulo: titulo || nome, volume: `Vol. ${m[1]}` }
+}
+
+/** `21/10 18:39` a partir do id do job (`YYYYmmdd-HHMMSS-xxxxxx`). */
+function dataDoJob(id: string): string {
+  const m = /^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})/.exec(id)
+  return m ? `${m[3]}/${m[2]} ${m[4]}:${m[5]}` : id
+}
+
+const ROTULO_ESTADO: Record<JobState, string> = {
+  running: 'Traduzindo',
+  paused: 'Pausado',
+  done: 'Concluído',
+  error: 'Erro',
+  cancelled: 'Cancelado',
+}
+
+const COR_PONTO: Record<JobState, string> = {
+  running: 'bg-atual',
+  paused: 'bg-aviso',
+  done: 'bg-sucesso',
+  error: 'bg-erro',
+  cancelled: 'bg-suave',
+}
+
+const ESTADO_DO_EVENTO: Record<BlockStatus, EstadoBloco> = {
+  traduzido: 'traduzido',
+  cache: 'cache',
+  falhou: 'falhou',
+  descartado: 'descartado',
+}
+
+/* ======================================================================== */
+/* Peças de interface                                                       */
+/* ======================================================================== */
+
+type Variante = 'primario' | 'neutro' | 'perigo' | 'aviso' | 'sucesso' | 'atual'
+
+const CLASSE_VARIANTE: Record<Variante, string> = {
+  primario: 'border-suave/60 bg-elevado font-semibold text-texto hover:border-texto/70',
+  neutro: 'border-borda bg-elevado text-texto hover:border-suave/50',
+  perigo: 'border-borda bg-transparent text-suave hover:border-erro/70 hover:text-erro',
+  aviso: 'border-aviso/50 bg-aviso/10 text-aviso hover:bg-aviso/20',
+  sucesso: 'border-sucesso/50 bg-sucesso/10 text-sucesso hover:bg-sucesso/20',
+  atual: 'border-atual/60 bg-atual/15 text-atual hover:bg-atual/25',
+}
+
+function Botao({
+  icone,
+  children,
+  variante = 'neutro',
+  className = '',
+  ...props
+}: {
+  icone?: NomeIcone
+  children: ReactNode
+  variante?: Variante
+} & ButtonHTMLAttributes<HTMLButtonElement>): ReactElement {
+  return (
+    <button
+      type="button"
+      {...props}
+      className={`inline-flex h-8 items-center gap-2 whitespace-nowrap rounded border px-3 font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${CLASSE_VARIANTE[variante]} ${className}`}
+    >
+      {icone && <Icone nome={icone} className="h-3.5 w-3.5" />}
+      {children}
+    </button>
+  )
+}
+
 const CLASSE_CAMPO =
-  'w-full rounded-md border border-borda bg-fundo px-3 py-2 text-sm text-texto ' +
-  'placeholder:text-suave/60 focus:border-acento focus:outline-none ' +
-  'disabled:cursor-not-allowed disabled:opacity-60'
+  'h-8 w-full rounded border border-borda bg-fundo px-2.5 text-texto placeholder:text-suave ' +
+  'focus:border-suave focus:outline-none'
 
-/** Classe Tailwind dos campos de arquivo (com o botão nativo estilizado). */
-const CLASSE_ARQUIVO =
-  'w-full rounded-md border border-borda bg-fundo px-3 py-2 text-sm text-texto ' +
-  'file:mr-3 file:rounded-md file:border-0 file:bg-borda file:px-3 file:py-1.5 ' +
-  'file:text-xs file:font-medium file:text-texto hover:file:bg-suave/25'
+/* ======================================================================== */
+/* App                                                                      */
+/* ======================================================================== */
 
-/** Classe Tailwind dos botões secundários. */
-const CLASSE_BOTAO =
-  'rounded-md border border-borda bg-fundo px-3 py-1.5 text-xs font-medium text-texto ' +
-  'transition-colors hover:border-acento hover:text-acento ' +
-  'disabled:cursor-not-allowed disabled:opacity-50'
-
-/** Classe Tailwind do botão principal ("Traduzir"). */
-const CLASSE_BOTAO_PRINCIPAL =
-  'rounded-md border border-acento/60 bg-acento/10 px-3 py-2 text-sm font-medium ' +
-  'text-acento transition-colors hover:bg-acento/20 ' +
-  'disabled:cursor-not-allowed disabled:opacity-50'
-
-/**
- * App completo: cabeçalho + barra de progresso + área principal.
- */
 export default function App(): ReactElement {
-  /* ------------------------------------------------------------------ */
-  /* Provedor de modelos                                                 */
-  /* ------------------------------------------------------------------ */
-  const [provedor, setProvedor] = useState<ProviderConfig>({
-    provider: 'lmstudio',
-    base_url: 'http://localhost:1234/v1',
-    api_key: '',
-    model: '',
+  /* ---------------- Provedor (salvo neste navegador, inclusive a chave) --- */
+  const [provedor, setProvedor] = useState<ProviderConfig>(() => {
+    const padrao: ProviderConfig = {
+      provider: 'lmstudio',
+      base_url: 'http://localhost:1234/v1',
+      api_key: '',
+      model: '',
+    }
+    try {
+      const salvo = window.localStorage.getItem(CHAVE_PROVEDOR_SALVO)
+      return salvo ? { ...padrao, ...(JSON.parse(salvo) as Partial<ProviderConfig>) } : padrao
+    } catch {
+      return padrao
+    }
   })
 
-  /** Recebe o patch do `ProviderSelector` (componente controlado). */
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(CHAVE_PROVEDOR_SALVO, JSON.stringify(provedor))
+    } catch {
+      // Sem armazenamento (aba privada etc.): só não lembra entre sessões.
+    }
+  }, [provedor])
+
   const alterarProvedor = useCallback((patch: Partial<ProviderConfig>): void => {
     setProvedor((atual) => ({ ...atual, ...patch }))
   }, [])
 
-  /* ------------------------------------------------------------------ */
-  /* Upload do livro e do glossário                                       */
-  /* ------------------------------------------------------------------ */
+  /* ---------------- Formulário de nova tradução --------------------------- */
   const [arquivo, setArquivo] = useState<File | null>(null)
-  const [nomeSaida, setNomeSaida] = useState('traducao_resultado.epub')
+  const [nomeSaida, setNomeSaida] = useState('')
   const [enviando, setEnviando] = useState(false)
   const [erroUpload, setErroUpload] = useState<string | null>(null)
-
+  const [arrastando, setArrastando] = useState(false)
   const [glossario, setGlossario] = useState<Record<string, string>>({})
   const [nomeGlossario, setNomeGlossario] = useState<string | null>(null)
   const [erroGlossario, setErroGlossario] = useState<string | null>(null)
 
-  /* ------------------------------------------------------------------ */
-  /* Job (estado espelhado pelo SSE)                                      */
-  /* ------------------------------------------------------------------ */
+  /* ---------------- Job ---------------------------------------------------- */
   const [jobId, setJobId] = useState<string | null>(null)
   const [ui, setUi] = useState<EstadoJob>(estadoInicial())
-
-  /** Acumulador do SSE: a fonte da verdade entre dois *flushes*. */
+  const [nonceSse, setNonceSse] = useState(0)
+  const [jobsRecentes, setJobsRecentes] = useState<JobSnapshot[]>([])
   const acumuladoRef = useRef<EstadoJob>(estadoInicial())
-  /** Timer do *throttle* (100 ms). */
   const temporizadorRef = useRef<number | null>(null)
-  /** Conexão SSE aberta (fechada no *cleanup*). */
   const fonteRef = useRef<EventSource | null>(null)
-  /** `true` quando já avisamos que a conexão caiu. */
   const avisouQuedaRef = useRef(false)
   const [avisoConexao, setAvisoConexao] = useState<string | null>(null)
 
-  /* ------------------------------------------------------------------ */
-  /* Capítulos e preview                                                  */
-  /* ------------------------------------------------------------------ */
+  /* ---------------- Campo de blocos (estado de cada bloco do livro) ------- */
+  const campoRef = useRef<Map<string, EstadoBloco[]>>(new Map())
+  const chegadasRef = useRef<Map<string, number>>(new Map())
+  const [versaoCampo, setVersaoCampo] = useState(0)
+
+  /* ---------------- Capítulos e preview ----------------------------------- */
   const [capitulos, setCapitulos] = useState<Chapter[]>([])
   const [capitulo, setCapitulo] = useState<string | null>(null)
   const [carregandoCapitulos, setCarregandoCapitulos] = useState(false)
   const [erroCapitulos, setErroCapitulos] = useState<string | null>(null)
-
   const [htmlOriginal, setHtmlOriginal] = useState('')
   const [htmlTraduzido, setHtmlTraduzido] = useState('')
   const [css, setCss] = useState('')
   const [carregandoPreview, setCarregandoPreview] = useState(false)
   const [erroPreview, setErroPreview] = useState<string | null>(null)
-  /** Contador que força o recarregamento do preview. */
-  const [noncePreview, setNoncePreview] = useState(0)
+  const [irPara, setIrPara] = useState<{ indice: number; n: number; suave?: boolean } | null>(null)
+  /** "Seguir tradução": o preview acompanha o bloco em tradução. */
+  const [seguindo, setSeguindo] = useState(false)
+  const ultimaRecargaRef = useRef(0)
+  const recargaPendenteRef = useRef<number | null>(null)
 
-  /* ------------------------------------------------------------------ */
-  /* Throttle: aplica o acumulado no React no máximo a cada 100 ms       */
-  /* ------------------------------------------------------------------ */
+  /* ---------------- Doca -------------------------------------------------- */
+  const [aba, setAba] = useState<AbaDoca>('log')
+  const [docaAberta, setDocaAberta] = useState(true)
+  const [soProblemas, setSoProblemas] = useState(false)
+
+  /* ======================================================================== */
+  /* Throttle do SSE                                                          */
+  /* ======================================================================== */
   const aplicar = useCallback((): void => {
     if (temporizadorRef.current !== null) {
       return
@@ -316,36 +394,72 @@ export default function App(): ReactElement {
     temporizadorRef.current = window.setTimeout(() => {
       temporizadorRef.current = null
       setUi({ ...acumuladoRef.current })
+      setVersaoCampo((v) => v + 1)
     }, INTERVALO_ATUALIZACAO_MS)
   }, [])
 
-  // Limpa o timer do throttle quando o App desmonta.
   useEffect(
     () => () => {
       if (temporizadorRef.current !== null) {
         window.clearTimeout(temporizadorRef.current)
-        temporizadorRef.current = null
+      }
+      if (recargaPendenteRef.current !== null) {
+        window.clearTimeout(recargaPendenteRef.current)
       }
     },
     [],
   )
 
-  /** Fecha a conexão SSE (job terminal). */
   const encerrarFluxo = useCallback((): void => {
-    const fonte = fonteRef.current
-    if (fonte) {
-      fonte.close()
-      fonteRef.current = null
+    fonteRef.current?.close()
+    fonteRef.current = null
+  }, [])
+
+  /* ======================================================================== */
+  /* Preview: carga inicial do capítulo e recarga ao vivo da tradução         */
+  /* ======================================================================== */
+  const capituloRef = useRef<string | null>(null)
+  capituloRef.current = capitulo
+
+  /** Recarrega só o lado traduzido (o painel aplica bloco a bloco). */
+  const recarregarTraducao = useCallback(async (): Promise<void> => {
+    const id = jobIdRef.current
+    const cap = capituloRef.current
+    if (!id || !cap) {
+      return
+    }
+    ultimaRecargaRef.current = Date.now()
+    try {
+      const html = await buscarPreview(id, cap, 'translated')
+      if (capituloRef.current === cap) {
+        setHtmlTraduzido(html)
+      }
+    } catch {
+      // A próxima recarga tenta de novo.
     }
   }, [])
 
-  /* ------------------------------------------------------------------ */
-  /* Eventos do SSE                                                      */
-  /* ------------------------------------------------------------------ */
+  /** Agenda uma recarga respeitando o intervalo mínimo. */
+  const agendarRecarga = useCallback((): void => {
+    if (recargaPendenteRef.current !== null) {
+      return
+    }
+    const espera = Math.max(0, INTERVALO_PREVIEW_MS - (Date.now() - ultimaRecargaRef.current))
+    recargaPendenteRef.current = window.setTimeout(() => {
+      recargaPendenteRef.current = null
+      void recarregarTraducao()
+    }, espera)
+  }, [recarregarTraducao])
+
+  const jobIdRef = useRef<string | null>(null)
+  jobIdRef.current = jobId
+
+  /* ======================================================================== */
+  /* Eventos do SSE                                                           */
+  /* ======================================================================== */
   const aoReceberEvento = useCallback(
     (evento: SseEvent): void => {
       const atual = acumuladoRef.current
-
       if (avisouQuedaRef.current) {
         avisouQuedaRef.current = false
         setAvisoConexao(null)
@@ -366,17 +480,25 @@ export default function App(): ReactElement {
           if (evento.detail && evento.detail.length > 0) {
             atual.detalhes = { ...atual.detalhes, [evento.status]: evento.detail }
           }
-          // Um evento de progresso significa que o job está vivo: some com
-          // o erro anterior (ex.: a queda da conexão já se resolveu).
           atual.erro = null
-          // A retomada vale na hora: o próximo evento de progresso confirma.
-          // Já a pausa só vale ENTRE lotes — os blocos do lote em andamento
-          // ainda geram eventos de progresso, então "pausando…" continua
-          // até chegar o evento "state: paused".
           if (atual.aguardando === 'retomada') {
             atual.aguardando = null
             atual.estado = 'running'
             atual.mensagem = null
+          }
+          // Campo: o bloco ganha o estado do evento.
+          const blocos = campoRef.current.get(evento.file)
+          if (blocos && evento.block_index >= 1 && evento.block_index <= blocos.length) {
+            const novo = ESTADO_DO_EVENTO[evento.status]
+            // "cache" de um bloco já traduzido antes não precisa de brilho.
+            if (novo === 'traduzido') {
+              chegadasRef.current.set(`${evento.file}#${evento.block_index}`, performance.now())
+            }
+            blocos[evento.block_index - 1] = novo
+          }
+          // Preview ao vivo do capítulo aberto.
+          if (evento.file === capituloRef.current && evento.status === 'traduzido') {
+            agendarRecarga()
           }
           break
         }
@@ -385,15 +507,13 @@ export default function App(): ReactElement {
           atual.estado = evento.state
           if (evento.state === 'paused') {
             atual.aguardando = null
-            const preservados = evento.done ?? atual.done
-            atual.mensagem = `Pausado — ${preservados} blocos preservados`
+            atual.mensagem = `Pausado — ${n(evento.done ?? atual.done)} blocos preservados no cache.`
           } else if (evento.state === 'cancelled') {
             atual.aguardando = null
-            atual.mensagem =
-              evento.message ?? 'Cancelado — o progresso salvo no cache foi preservado.'
+            atual.mensagem = evento.message ?? 'Cancelado — o que já foi traduzido ficou no cache.'
           } else if (evento.state === 'done') {
             atual.aguardando = null
-            atual.mensagem = 'Tradução concluída.'
+            atual.mensagem = null
           } else if (evento.state === 'error') {
             atual.aguardando = null
           }
@@ -406,7 +526,7 @@ export default function App(): ReactElement {
         case 'done': {
           atual.estado = 'done'
           atual.aguardando = null
-          atual.mensagem = 'Tradução concluída.'
+          atual.mensagem = null
           if (evento.report) {
             atual.relatorio = evento.report
           }
@@ -426,72 +546,76 @@ export default function App(): ReactElement {
           break
         }
       }
-
       aplicar()
     },
-    [aplicar, encerrarFluxo],
+    [aplicar, encerrarFluxo, agendarRecarga],
   )
 
-  /* ------------------------------------------------------------------ */
-  /* Conexão SSE (abre com o job, fecha no cleanup)                       */
-  /* ------------------------------------------------------------------ */
+  /* SSE: abre com o job, reabre quando o nonce muda (retomada). */
   useEffect(() => {
     if (!jobId) {
       return
     }
-    const fonte = conectarEventos(
-      jobId,
-      aoReceberEvento,
-      () => {
-        // A conexão caiu. Se o job já terminou, não há o que reconectar:
-        // o EventSource ficaria reconectando em laço.
-        if (acumuladoRef.current.estado === 'done'
-          || acumuladoRef.current.estado === 'error'
-          || acumuladoRef.current.estado === 'cancelled') {
-          encerrarFluxo()
-          return
-        }
-        // Caso contrário, o próprio EventSource tenta reconectar.
-        if (!avisouQuedaRef.current) {
-          avisouQuedaRef.current = true
-          setAvisoConexao('Conexão com o servidor perdida — tentando reconectar…')
-        }
-      },
-    )
+    const estado = acumuladoRef.current.estado
+    if (nonceSse === 0 && (estado === 'done' || estado === 'error' || estado === 'cancelled')) {
+      // Job já encerrado ao ser aberto: nada vai chegar pelo SSE.
+      return
+    }
+    const fonte = conectarEventos(jobId, aoReceberEvento, () => {
+      const e = acumuladoRef.current.estado
+      if (e === 'done' || e === 'error' || e === 'cancelled') {
+        encerrarFluxo()
+        return
+      }
+      if (!avisouQuedaRef.current) {
+        avisouQuedaRef.current = true
+        setAvisoConexao('Conexão com o servidor perdida — tentando reconectar…')
+      }
+    })
     fonteRef.current = fonte
-
     return () => {
       fonte.close()
       if (fonteRef.current === fonte) {
         fonteRef.current = null
       }
     }
-  }, [jobId, aoReceberEvento])
+  }, [jobId, aoReceberEvento, nonceSse, encerrarFluxo])
 
-  /* ------------------------------------------------------------------ */
-  /* Capítulos                                                            */
-  /* ------------------------------------------------------------------ */
+  /* ======================================================================== */
+  /* Capítulos (e o campo, que nasce das máscaras do cache)                   */
+  /* ======================================================================== */
   const carregarCapitulos = useCallback(async (id: string): Promise<void> => {
     setCarregandoCapitulos(true)
     setErroCapitulos(null)
     try {
       const lista = await listarCapitulos(id)
+      const mapa = new Map<string, EstadoBloco[]>()
+      for (const item of lista) {
+        const mascara = item.mask ?? ''
+        mapa.set(
+          item.path,
+          Array.from({ length: item.blocks }, (_, i): EstadoBloco => (mascara[i] === '1' ? 'cache' : 'pendente')),
+        )
+      }
+      campoRef.current = mapa
+      chegadasRef.current = new Map()
+      setVersaoCampo((v) => v + 1)
       setCapitulos(lista)
-      setCapitulo(lista.length > 0 ? lista[0].path : null)
+      setCapitulo((atual) => {
+        if (atual && lista.some((item) => item.path === atual)) {
+          return atual
+        }
+        return (lista.find((item) => item.blocks > 0) ?? lista[0])?.path ?? null
+      })
     } catch (falha) {
       setCapitulos([])
-      setCapitulo(null)
-      setErroCapitulos(
-        mensagemDeErro(falha, 'Não foi possível carregar os capítulos do livro.'),
-      )
+      setErroCapitulos(mensagemDeErro(falha, 'Não foi possível carregar os capítulos do livro.'))
     } finally {
       setCarregandoCapitulos(false)
     }
   }, [])
 
-  /* ------------------------------------------------------------------ */
-  /* Preview do capítulo selecionado                                      */
-  /* ------------------------------------------------------------------ */
+  /* Preview: carga completa ao trocar de capítulo. */
   useEffect(() => {
     if (!jobId || !capitulo) {
       return
@@ -499,11 +623,8 @@ export default function App(): ReactElement {
     let cancelado = false
     setCarregandoPreview(true)
     setErroPreview(null)
-    // O preview do capítulo anterior não pode ficar na tela enquanto o
-    // novo carrega (a rolagem sincronizada ficaria desalinhada).
     setHtmlOriginal('')
     setHtmlTraduzido('')
-
     void (async (): Promise<void> => {
       try {
         const [original, traduzido, folha] = await Promise.all([
@@ -514,36 +635,31 @@ export default function App(): ReactElement {
         if (cancelado) {
           return
         }
+        ultimaRecargaRef.current = Date.now()
         setHtmlOriginal(original)
         setHtmlTraduzido(traduzido)
         setCss(folha)
-        setErroPreview(null)
       } catch (falha) {
-        if (cancelado) {
-          return
+        if (!cancelado) {
+          setErroPreview(mensagemDeErro(falha, 'Não foi possível carregar o capítulo.'))
         }
-        setErroPreview(mensagemDeErro(falha, 'Não foi possível carregar o capítulo.'))
       } finally {
         if (!cancelado) {
           setCarregandoPreview(false)
         }
       }
     })()
-
     return () => {
       cancelado = true
     }
-  }, [jobId, capitulo, noncePreview])
+  }, [jobId, capitulo])
 
-  /* ------------------------------------------------------------------ */
-  /* Fotografia final do job (nome da saída + integridade)                */
-  /* ------------------------------------------------------------------ */
+  /* Fim do job: fotografia final, máscaras do cache e preview atualizado. */
   useEffect(() => {
     if (!jobId || ui.estado !== 'done') {
       return
     }
     let cancelado = false
-
     void (async (): Promise<void> => {
       try {
         const foto = await obterJob(jobId)
@@ -551,11 +667,9 @@ export default function App(): ReactElement {
           return
         }
         const atual = acumuladoRef.current
-        if (foto.output_name) {
-          atual.nomeSaida = foto.output_name
-        }
+        atual.nomeSaida = foto.output_name
         atual.temSaida = foto.has_output
-        if (foto.integrity && foto.integrity.length > 0) {
+        if (foto.integrity?.length) {
           atual.integridade = foto.integrity
         }
         if (foto.report) {
@@ -563,31 +677,74 @@ export default function App(): ReactElement {
         }
         aplicar()
       } catch {
-        // O evento "done" já traz o essencial: a falha aqui é cosmética.
+        // O evento "done" já trouxe o essencial.
       }
     })()
-
     return () => {
       cancelado = true
     }
   }, [jobId, ui.estado, aplicar])
 
-  /* ------------------------------------------------------------------ */
-  /* Ações                                                                */
-  /* ------------------------------------------------------------------ */
+  /* ======================================================================== */
+  /* Traduções recentes                                                       */
+  /* ======================================================================== */
+  const atualizarRecentes = useCallback(async (): Promise<void> => {
+    try {
+      setJobsRecentes(await listarJobs())
+    } catch {
+      // Conveniência: sem a lista a interface continua funcionando.
+    }
+  }, [])
 
-  /** Envia o .epub e cria o job (abre o SSE pelo efeito do `jobId`). */
+  useEffect(() => {
+    if (!jobId || ui.estado !== 'running') {
+      void atualizarRecentes()
+    }
+  }, [jobId, ui.estado, atualizarRecentes])
+
+  /* ======================================================================== */
+  /* Ações                                                                    */
+  /* ======================================================================== */
+  const abrirJob = useCallback(
+    async (id: string): Promise<void> => {
+      try {
+        const foto = await obterJob(id)
+        encerrarFluxo()
+        const atual = estadoInicial()
+        aplicarFotografia(atual, foto)
+        acumuladoRef.current = atual
+        setUi({ ...atual })
+        setAvisoConexao(null)
+        setCapitulo(null)
+        setCapitulos([])
+        setNonceSse(0)
+        setJobId(id)
+        await carregarCapitulos(id)
+      } catch (falha) {
+        setErroUpload(mensagemDeErro(falha, 'Não foi possível abrir esta tradução.'))
+      }
+    },
+    [carregarCapitulos, encerrarFluxo],
+  )
+
+  const novaTraducao = useCallback((): void => {
+    encerrarFluxo()
+    setJobId(null)
+    setCapitulos([])
+    setCapitulo(null)
+    acumuladoRef.current = estadoInicial()
+    setUi(estadoInicial())
+    void atualizarRecentes()
+  }, [encerrarFluxo, atualizarRecentes])
+
   const iniciarTraducao = useCallback(async (): Promise<void> => {
     if (!arquivo) {
       setErroUpload('Escolha um arquivo .epub para traduzir.')
       return
     }
-    // O modelo pode ficar vazio: o back-end resolve o modelo carregado
-    // no provedor. Se o provedor não tiver nenhum, o erro chega pelo SSE.
-
     setEnviando(true)
     setErroUpload(null)
-
+    const saida = nomeSaida.trim() || arquivo.name.replace(/\.epub$/i, '') + ' (traduzido).epub'
     const config: JobConfig = {
       provider: provedor.provider,
       base_url: provedor.base_url,
@@ -597,49 +754,72 @@ export default function App(): ReactElement {
       batch_size: TAMANHO_LOTE,
       temperature: TEMPERATURA,
       glossary: glossario,
-      output_name: nomeSaida.trim().length > 0 ? nomeSaida.trim() : 'traducao_resultado.epub',
+      output_name: saida,
     }
-
     try {
       const criado = await criarJob(arquivo, config)
+      encerrarFluxo()
       acumuladoRef.current = estadoInicial()
-      setUi(estadoInicial())
+      acumuladoRef.current.nomeSaida = saida
+      setUi({ ...acumuladoRef.current })
       setAvisoConexao(null)
+      setCapitulo(null)
+      setNonceSse(0)
       setJobId(criado.job_id)
+      setArquivo(null)
       await carregarCapitulos(criado.job_id)
-      // Fotografia inicial: cobre o caso de o job terminar ANTES de o SSE
-      // abrir (com um provedor muito rápido, o "done" pode já ter acontecido).
       try {
         const foto = await obterJob(criado.job_id)
-        const atual = acumuladoRef.current
-        atual.estado = foto.state
-        atual.total = foto.total
-        atual.done = foto.done
-        atual.translated = foto.translated
-        atual.cached = foto.cached
-        atual.failed = foto.failed
-        atual.discarded = foto.discarded
-        atual.elapsed_s = foto.elapsed_s
-        atual.eta_s = foto.eta_s
-        atual.arquivo = foto.current_file
-        atual.bloco = foto.current_block
-        atual.erro = foto.error
-        atual.relatorio = foto.report
-        atual.integridade = foto.integrity
-        atual.nomeSaida = foto.output_name
-        atual.temSaida = foto.has_output
-        setUi({ ...atual })
+        aplicarFotografia(acumuladoRef.current, foto)
+        setUi({ ...acumuladoRef.current })
       } catch {
-        // Sem a fotografia inicial, o SSE preenche o estado de qualquer forma.
+        // O SSE preenche o estado de qualquer forma.
       }
+      void atualizarRecentes()
     } catch (falha) {
       setErroUpload(mensagemDeErro(falha, 'Não foi possível iniciar a tradução.'))
     } finally {
       setEnviando(false)
     }
-  }, [arquivo, provedor, glossario, nomeSaida, carregarCapitulos])
+  }, [arquivo, nomeSaida, provedor, glossario, carregarCapitulos, encerrarFluxo, atualizarRecentes])
 
-  /** Pede a pausa (vale entre lotes: o lote atual ainda termina). */
+  /** Retoma (pausado) ou retraduz o que falta (parado): o cache cobre o resto. */
+  const retomar = useCallback(
+    async (mensagem: string): Promise<void> => {
+      if (!jobId) {
+        return
+      }
+      const atual = acumuladoRef.current
+      const anterior = atual.estado
+      atual.aguardando = 'retomada'
+      atual.estado = 'running'
+      atual.erro = null
+      atual.mensagem = mensagem
+      // Pendentes voltam a ser "pendentes" (não falhas) durante a nova rodada.
+      for (const blocos of campoRef.current.values()) {
+        blocos.forEach((estado, i) => {
+          if (estado === 'falhou' || estado === 'descartado') {
+            blocos[i] = 'pendente'
+          }
+        })
+      }
+      aplicar()
+      try {
+        await retomarJob(jobId, provedor.api_key || undefined)
+        setNonceSse((v) => v + 1)
+      } catch (falha) {
+        atual.aguardando = null
+        atual.estado = anterior
+        atual.mensagem = null
+        atual.erro =
+          mensagemDeErro(falha, 'Não foi possível retomar.') +
+          ' Se o servidor foi reiniciado, confira a chave em Provedor.'
+        aplicar()
+      }
+    },
+    [jobId, aplicar, provedor.api_key],
+  )
+
   const aoPausar = useCallback(async (): Promise<void> => {
     if (!jobId) {
       return
@@ -651,181 +831,373 @@ export default function App(): ReactElement {
       await pausarJob(jobId)
     } catch (falha) {
       atual.aguardando = null
-      atual.erro = mensagemDeErro(falha, 'Não foi possível pausar a tradução.')
+      atual.erro = mensagemDeErro(falha, 'Não foi possível pausar.')
       aplicar()
     }
   }, [jobId, aplicar])
 
-  /** Retoma a tradução: os blocos já traduzidos voltam do cache. */
-  const aoRetomar = useCallback(async (): Promise<void> => {
-    if (!jobId) {
-      return
-    }
-    const atual = acumuladoRef.current
-    const estadoAnterior = atual.estado
-    atual.aguardando = 'retomada'
-    atual.estado = 'running'
-    atual.mensagem = null
-    aplicar()
-    try {
-      await retomarJob(jobId)
-    } catch (falha) {
-      atual.aguardando = null
-      atual.estado = estadoAnterior
-      atual.erro = mensagemDeErro(falha, 'Não foi possível retomar a tradução.')
-      aplicar()
-    }
-  }, [jobId, aplicar])
-
-  /** Cancela a tradução (o cache gravado é preservado). */
   const aoCancelar = useCallback(async (): Promise<void> => {
-    if (!jobId) {
+    if (!jobId || !window.confirm('Cancelar a tradução? O que já foi traduzido fica no cache.')) {
       return
     }
     try {
       await cancelarJob(jobId)
-      const atual = acumuladoRef.current
-      atual.mensagem = 'Cancelando… — o progresso salvo no cache foi preservado.'
+      acumuladoRef.current.mensagem = 'Cancelando…'
       aplicar()
     } catch (falha) {
-      const atual = acumuladoRef.current
-      atual.erro = mensagemDeErro(falha, 'Não foi possível cancelar a tradução.')
+      acumuladoRef.current.erro = mensagemDeErro(falha, 'Não foi possível cancelar.')
       aplicar()
     }
   }, [jobId, aplicar])
 
-  /** Descarta o cache do job (ação separada do cancelamento). */
   const aoDescartarCache = useCallback(async (): Promise<void> => {
-    if (!jobId) {
-      return
-    }
-    if (!window.confirm('Descartar o cache? Todo o progresso desta traducao sera perdido.')) {
+    if (
+      !jobId ||
+      !window.confirm('Descartar o cache? Tudo o que foi traduzido neste job terá de ser refeito.')
+    ) {
       return
     }
     try {
       await descartarCache(jobId)
-      const atual = acumuladoRef.current
-      atual.mensagem = 'Cache descartado — a próxima tradução refaz todos os blocos.'
+      acumuladoRef.current.mensagem = 'Cache descartado — a próxima rodada refaz todos os blocos.'
       aplicar()
+      await carregarCapitulos(jobId)
     } catch (falha) {
-      const atual = acumuladoRef.current
-      atual.erro = mensagemDeErro(falha, 'Não foi possível descartar o cache.')
+      acumuladoRef.current.erro = mensagemDeErro(falha, 'Não foi possível descartar o cache.')
       aplicar()
     }
-  }, [jobId, aplicar])
+  }, [jobId, aplicar, carregarCapitulos])
 
-  /** Baixa o EPUB traduzido. */
   const aoBaixar = useCallback(async (): Promise<void> => {
     if (!jobId) {
       return
     }
     try {
-      await baixarJob(jobId, ui.nomeSaida ?? nomeSaida)
+      await baixarJob(jobId, ui.nomeSaida ?? 'traducao.epub')
     } catch (falha) {
-      const atual = acumuladoRef.current
-      atual.erro = mensagemDeErro(falha, 'Não foi possível baixar o EPUB traduzido.')
+      acumuladoRef.current.erro = mensagemDeErro(falha, 'Não foi possível baixar o EPUB.')
       aplicar()
     }
-  }, [jobId, ui.nomeSaida, nomeSaida, aplicar])
+  }, [jobId, ui.nomeSaida, aplicar])
 
-  /** Log do job (o `LogViewer` cuida do modal e do auto-scroll). */
-  const carregarLog = useCallback(async (): Promise<LogResponse> => {
-    if (!jobId) {
-      throw new Error('Ainda não há tradução em andamento — o log fica disponível após o upload.')
+  const escolherArquivo = useCallback((lista: FileList | null): void => {
+    const escolhido = lista?.[0] ?? null
+    if (escolhido && !/\.epub$/i.test(escolhido.name)) {
+      setErroUpload('Esse arquivo não é um .epub.')
+      return
     }
-    return await buscarLog(jobId)
-  }, [jobId])
-
-  /** Escolhe o arquivo .epub. */
-  const aoEscolherArquivo = useCallback((evento: ChangeEvent<HTMLInputElement>): void => {
-    setArquivo(evento.target.files?.[0] ?? null)
+    setArquivo(escolhido)
     setErroUpload(null)
   }, [])
 
-  /** Lê o glossário (YAML simples ou JSON) no browser. */
-  const aoEscolherGlossario = useCallback(
-    async (evento: ChangeEvent<HTMLInputElement>): Promise<void> => {
-      const entrada = evento.target
-      const arquivoGlossario = entrada.files?.[0]
-      // Permite reenviar o mesmo arquivo depois.
-      entrada.value = ''
-      if (!arquivoGlossario) {
-        return
-      }
-      try {
-        const conteudo = await arquivoGlossario.text()
-        const termos = lerGlossario(conteudo)
-        setGlossario(termos)
-        setNomeGlossario(arquivoGlossario.name)
-        setErroGlossario(null)
-        if (Object.keys(termos).length === 0) {
-          setErroGlossario(
-            'O glossário foi lido, mas nenhum termo foi encontrado — use JSON ' +
-              '({"termo": "tradução"}) ou YAML simples (termo: tradução).',
-          )
+  const aoEscolherGlossario = useCallback(async (evento: ChangeEvent<HTMLInputElement>): Promise<void> => {
+    const entrada = evento.target
+    const escolhido = entrada.files?.[0]
+    entrada.value = ''
+    if (!escolhido) {
+      return
+    }
+    try {
+      const termos = lerGlossario(await escolhido.text())
+      setGlossario(termos)
+      setNomeGlossario(escolhido.name)
+      setErroGlossario(
+        Object.keys(termos).length === 0
+          ? 'Nenhum termo encontrado — use JSON ({"termo": "tradução"}) ou YAML simples (termo: tradução).'
+          : null,
+      )
+    } catch {
+      setGlossario({})
+      setNomeGlossario(escolhido.name)
+      setErroGlossario('Não foi possível ler o glossário.')
+    }
+  }, [])
+
+  /* ======================================================================== */
+  /* Derivados                                                                */
+  /* ======================================================================== */
+  const rodando = ui.estado === 'running' || ui.estado === 'paused'
+  const parado = ui.estado === 'done' || ui.estado === 'cancelled' || ui.estado === 'error'
+
+  // Contagens por capítulo, ao vivo (vêm do campo).
+  const itensCapitulos: ItemCapitulo[] = useMemo(
+    () =>
+      capitulos.map((c) => {
+        const blocos = campoRef.current.get(c.path) ?? []
+        const traduzidos = blocos.filter((e) => e === 'cache' || e === 'traduzido').length
+        return {
+          path: c.path,
+          index: c.index,
+          title: c.title,
+          blocos: c.blocks,
+          traduzidos,
+          semTraducao: c.blocks - traduzidos,
         }
-      } catch {
-        setGlossario({})
-        setNomeGlossario(arquivoGlossario.name)
-        setErroGlossario('Não foi possível ler o glossário (o arquivo não pôde ser lido?).')
-      }
-    },
-    [],
+      }),
+    // versaoCampo: o campo é mutável (ref) e só a versão avisa da mudança.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [capitulos, versaoCampo],
   )
 
-  /* ------------------------------------------------------------------ */
-  /* Valores derivados                                                    */
-  /* ------------------------------------------------------------------ */
-  /** Percentual concluído (0 a 100). */
-  const percentual = ui.total > 0 ? (ui.done / ui.total) * 100 : 0
-  /** Título do capítulo selecionado. */
-  const tituloCapitulo =
-    capitulos.find((item) => item.path === capitulo)?.title ?? 'Capítulo'
-  /** Quantidade de termos do glossário carregado. */
-  const totalTermos = Object.keys(glossario).length
-  /** `true` quando o EPUB traduzido pode ser baixado. */
-  const podeBaixar = ui.estado === 'done' && ui.temSaida
-  /** `true` quando há job (a faixa do progresso só existe com job). */
-  const temJob = jobId !== null
+  const capitulosDoCampo: CapituloDoCampo[] = useMemo(
+    () =>
+      capitulos
+        .filter((c) => c.blocks > 0)
+        .map((c) => ({ path: c.path, title: c.title, blocos: campoRef.current.get(c.path) ?? [] })),
+    [capitulos],
+  )
 
+  const semTraducao = itensCapitulos.reduce((soma, c) => soma + c.semTraducao, 0)
+  const totalBlocos = itensCapitulos.reduce((soma, c) => soma + c.blocos, 0)
+  const prontos = totalBlocos - semTraducao
+  const percentual = totalBlocos > 0 ? (prontos / totalBlocos) * 100 : 0
+  const podeRetraduzir = parado && ui.aguardando === null && semTraducao > 0
+  const podeBaixar = ui.temSaida && parado
+  const ritmo = ui.elapsed_s > 30 && ui.translated > 0 ? (ui.translated / ui.elapsed_s) * 60 : null
+
+  // Bloco em tradução: o seguinte ao último concluído (o lote inteiro está no modelo).
+  const atual =
+    ui.estado === 'running' && ui.arquivo && ui.bloco !== null
+      ? { path: ui.arquivo, indice: Math.min(ui.bloco + 1, campoRef.current.get(ui.arquivo)?.length ?? ui.bloco) }
+      : null
+
+  // Seguir: abre o capítulo em tradução e leva a vista até o bloco atual.
+  const alvoSeguir = seguindo && atual ? `${atual.path}#${atual.indice}` : null
+  useEffect(() => {
+    if (!alvoSeguir) {
+      return
+    }
+    const [path, indice] = [alvoSeguir.slice(0, alvoSeguir.lastIndexOf('#')), Number(alvoSeguir.slice(alvoSeguir.lastIndexOf('#') + 1))]
+    if (path !== capituloRef.current) {
+      setCapitulo(path)
+    }
+    setIrPara({ indice, n: Date.now(), suave: path === capituloRef.current })
+  }, [alvoSeguir])
+
+  // Fim da tradução: não há mais o que seguir.
+  useEffect(() => {
+    if (ui.estado !== 'running') {
+      setSeguindo(false)
+    }
+  }, [ui.estado])
+
+  const capituloAtivo = capitulos.find((c) => c.path === capitulo) ?? null
+  const itemAtivo = itensCapitulos.find((c) => c.path === capitulo) ?? null
+
+  /* ======================================================================== */
+  /* Render                                                                   */
+  /* ======================================================================== */
   return (
-    <div className="flex min-h-full flex-col bg-fundo text-texto">
-      {/* ============================================================= */}
-      {/* FAIXA 1 — CABEÇALHO                                            */}
-      {/* ============================================================= */}
-      <header className="border-b border-borda bg-surface">
-        <div className="mx-auto max-w-7xl px-4 py-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <span
-                className="inline-block h-2.5 w-2.5 rounded-full bg-acento"
-                aria-hidden="true"
-              />
-              <h1 className="text-lg font-semibold tracking-tight">Tradutor de EPUB</h1>
-              <span className="hidden text-sm text-suave sm:inline">
-                tradução local com modelos OpenAI-compatíveis
-              </span>
-            </div>
+    <div className="grid h-full grid-cols-[15.5rem_minmax(0,1fr)] bg-fundo">
+      {/* ================================================================ */}
+      {/* TRILHO                                                            */}
+      {/* ================================================================ */}
+      <aside className="flex min-h-0 flex-col border-r border-borda bg-surface">
+        <div className="flex h-12 shrink-0 items-center gap-2.5 border-b border-borda px-4">
+          <svg viewBox="0 0 18 14" className="h-3.5 w-[18px] text-texto" aria-hidden="true">
+            {[0, 2, 3, 5, 8, 9, 11, 14, 16].map((x, i) => (
+              <rect key={x} x={x} y="0" width={i % 3 === 0 ? 1.4 : 0.8} height="14" fill="currentColor" />
+            ))}
+          </svg>
+          <span className="font-semibold tracking-tight">Tradutor de EPUB</span>
+        </div>
 
-            <div className="flex flex-wrap items-center gap-2">
-              {podeBaixar && (
+        <div className="border-b border-borda p-3">
+          <Botao
+            icone="mais"
+            variante={jobId ? 'neutro' : 'primario'}
+            className="w-full justify-center"
+            onClick={novaTraducao}
+          >
+            Nova tradução
+          </Botao>
+        </div>
+
+        <div className="flex h-9 shrink-0 items-center justify-between px-4">
+          <h2 className="painel-titulo">Traduções</h2>
+          <button
+            type="button"
+            onClick={() => void atualizarRecentes()}
+            className="text-suave transition-colors hover:text-texto"
+            title="Atualizar a lista"
+            aria-label="Atualizar a lista de traduções"
+          >
+            <Icone nome="atualizar" className="h-3.5 w-3.5" />
+          </button>
+        </div>
+        <ul className="min-h-0 flex-1 overflow-y-auto pb-2">
+          {jobsRecentes.length === 0 && (
+            <li className="px-4 py-2 text-suave">As traduções que você fizer aparecem aqui.</li>
+          )}
+          {jobsRecentes.map((job) => {
+            const aberto = job.job_id === jobId
+            const falhas = job.failed + job.discarded
+            const estado = aberto ? ui.estado : job.state
+            return (
+              <li key={job.job_id}>
                 <button
                   type="button"
-                  onClick={() => {
-                    void aoBaixar()
-                  }}
-                  className="rounded-md border border-sucesso/60 bg-sucesso/10 px-3 py-1.5 text-xs font-medium text-sucesso transition-colors hover:bg-sucesso/20"
-                  title="Baixar o EPUB traduzido"
+                  onClick={() => void abrirJob(job.job_id)}
+                  className={`block w-full px-4 py-2 text-left transition-colors ${aberto ? 'bg-elevado' : 'hover:bg-elevado/60'}`}
                 >
-                  Baixar EPUB
+                  <span className="flex items-center gap-2">
+                    <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${COR_PONTO[estado]}`} />
+                    <span
+                      className={`min-w-0 flex-1 truncate ${aberto ? 'text-texto' : 'text-texto/85'}`}
+                      title={nomeDoLivro(job.output_name)}
+                    >
+                      {partesDoNome(nomeDoLivro(job.output_name)).titulo}
+                    </span>
+                    {partesDoNome(nomeDoLivro(job.output_name)).volume && (
+                      <span className="num shrink-0 font-mono text-[11px] text-texto/85">
+                        {partesDoNome(nomeDoLivro(job.output_name)).volume}
+                      </span>
+                    )}
+                  </span>
+                  <span className="num mt-0.5 flex gap-2 pl-3.5 text-[11px] text-suave">
+                    <span>{dataDoJob(job.job_id)}</span>
+                    <span>·</span>
+                    <span>{ROTULO_ESTADO[estado].toLowerCase()}</span>
+                    {falhas > 0 && !aberto && <span className="text-erro">· {n(falhas)} falhas</span>}
+                  </span>
                 </button>
-              )}
-              <LogViewer carregar={carregarLog} rotulo="Ver log" />
-            </div>
+              </li>
+            )
+          })}
+        </ul>
+
+        <button
+          type="button"
+          onClick={() => {
+            if (jobId) {
+              setAba('provedor')
+              setDocaAberta(true)
+            }
+          }}
+          className="flex shrink-0 items-center gap-2.5 border-t border-borda px-4 py-3 text-left transition-colors hover:bg-elevado/60"
+          title="Provedor de modelos em uso"
+        >
+          <Icone nome="chave" className="h-3.5 w-3.5 shrink-0 text-suave" />
+          <span className="min-w-0 flex-1">
+            <span className={`block truncate ${provedor.model ? 'text-texto' : 'text-suave'}`}>
+              {provedor.model || 'nenhum modelo escolhido'}
+            </span>
+            <span className="block truncate font-mono text-[11px] text-suave">
+              {provedor.base_url.replace(/^https?:\/\//, '')}
+              {provedor.api_key ? ' · chave salva' : ''}
+            </span>
+          </span>
+        </button>
+      </aside>
+
+      {/* ================================================================ */}
+      {/* PRINCIPAL                                                         */}
+      {/* ================================================================ */}
+      {!jobId ? (
+        <main className="min-h-0 overflow-y-auto">
+          <div className="flex h-12 items-center border-b border-borda px-6">
+            <h1 className="text-[15px] font-semibold">Nova tradução</h1>
           </div>
 
-          <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-3">
-            <div className="lg:col-span-2">
+          <div className="grid max-w-[84rem] grid-cols-2 gap-px border-b border-borda bg-borda">
+            {/* Livro */}
+            <section className="bg-fundo p-6">
+              <h2 className="text-[15px] font-semibold">Livro</h2>
+              <p className="mt-1 text-suave">O EPUB é traduzido inteiro para {IDIOMA_DESTINO}, preservando imagens, estilo e índice.</p>
+
+              <label
+                onDragOver={(e: DragEvent) => {
+                  e.preventDefault()
+                  setArrastando(true)
+                }}
+                onDragLeave={() => setArrastando(false)}
+                onDrop={(e: DragEvent) => {
+                  e.preventDefault()
+                  setArrastando(false)
+                  escolherArquivo(e.dataTransfer.files)
+                }}
+                className={`mt-5 flex cursor-pointer flex-col items-center justify-center gap-2 rounded border border-dashed px-6 py-10 text-center transition-colors ${
+                  arrastando ? 'border-texto/70 bg-elevado' : arquivo ? 'border-sucesso/50 bg-sucesso/5' : 'border-borda hover:border-suave/60'
+                }`}
+              >
+                <input
+                  type="file"
+                  accept=".epub,application/epub+zip"
+                  className="sr-only"
+                  onChange={(e) => escolherArquivo(e.target.files)}
+                />
+                <Icone nome="livro" className={`h-6 w-6 ${arquivo ? 'text-sucesso' : 'text-suave'}`} />
+                {arquivo ? (
+                  <>
+                    <span className="text-texto">{arquivo.name}</span>
+                    <span className="num text-[11px] text-suave">
+                      {(arquivo.size / 1024 / 1024).toFixed(1).replace('.', ',')} MB · clique para trocar
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span className="text-texto">Arraste o .epub aqui</span>
+                    <span className="text-[11px] text-suave">ou clique para escolher</span>
+                  </>
+                )}
+              </label>
+
+              <div className="mt-5 grid grid-cols-2 gap-4">
+                <div>
+                  <label htmlFor="campo-saida" className="mb-1.5 block text-[12px] text-suave">
+                    Nome do arquivo traduzido
+                  </label>
+                  <input
+                    id="campo-saida"
+                    type="text"
+                    value={nomeSaida}
+                    spellCheck={false}
+                    onChange={(e) => setNomeSaida(e.target.value)}
+                    className={CLASSE_CAMPO}
+                    placeholder={arquivo ? arquivo.name.replace(/\.epub$/i, '') + ' (traduzido).epub' : 'automático'}
+                  />
+                </div>
+                <div>
+                  <span className="mb-1.5 block text-[12px] text-suave">Glossário de nomes próprios</span>
+                  <label className={`${CLASSE_CAMPO} flex cursor-pointer items-center gap-2 hover:border-suave/60`}>
+                    <input
+                      type="file"
+                      accept=".yaml,.yml,.json,.txt"
+                      className="sr-only"
+                      onChange={(e) => void aoEscolherGlossario(e)}
+                    />
+                    <span className={`min-w-0 flex-1 truncate ${nomeGlossario ? 'text-texto' : 'text-suave'}`}>
+                      {nomeGlossario ?? 'opcional — JSON ou YAML'}
+                    </span>
+                    {nomeGlossario && (
+                      <span className="num shrink-0 text-[11px] text-suave">
+                        {Object.keys(glossario).length} termos
+                      </span>
+                    )}
+                  </label>
+                  {erroGlossario && <p className="mt-1 text-[12px] text-erro">{erroGlossario}</p>}
+                </div>
+              </div>
+
+              <div className="mt-6 flex items-center gap-3">
+                <Botao
+                  variante="primario"
+                  icone="retomar"
+                  disabled={enviando || !arquivo}
+                  onClick={() => void iniciarTraducao()}
+                  className="h-9 px-4"
+                >
+                  {enviando ? 'Enviando…' : 'Traduzir'}
+                </Botao>
+                <span className="text-[12px] text-suave">
+                  Lotes de {TAMANHO_LOTE} blocos · {provedor.model || 'modelo carregado no provedor'}
+                </span>
+              </div>
+              {erroUpload && <p className="mt-3 text-erro">{erroUpload}</p>}
+            </section>
+
+            {/* Provedor */}
+            <section className="bg-fundo">
               <ProviderSelector
                 provider={provedor.provider}
                 base_url={provedor.base_url}
@@ -833,232 +1205,306 @@ export default function App(): ReactElement {
                 model={provedor.model}
                 onChange={alterarProvedor}
               />
-            </div>
-
-            {/* Upload do livro + glossário */}
-            <section className="rounded-lg border border-borda bg-surface p-4">
-              <h2 className="text-sm font-semibold text-texto">Livro</h2>
-
-              <label htmlFor="campo-epub" className="mb-1 mt-3 block text-xs font-medium text-suave">
-                Arquivo .epub
-              </label>
-              <input
-                id="campo-epub"
-                type="file"
-                accept=".epub,application/epub+zip"
-                onChange={aoEscolherArquivo}
-                className={CLASSE_ARQUIVO}
-              />
-
-              <label htmlFor="campo-saida" className="mb-1 mt-3 block text-xs font-medium text-suave">
-                Nome do arquivo de saída
-              </label>
-              <input
-                id="campo-saida"
-                type="text"
-                value={nomeSaida}
-                spellCheck={false}
-                onChange={(evento) => setNomeSaida(evento.target.value)}
-                className={CLASSE_CAMPO}
-                placeholder="traducao_resultado.epub"
-              />
-
-              <button
-                type="button"
-                onClick={() => {
-                  void iniciarTraducao()
-                }}
-                disabled={enviando || !arquivo}
-                className={`${CLASSE_BOTAO_PRINCIPAL} mt-3 w-full`}
-                title="Envia o livro e inicia a tradução"
-              >
-                {enviando ? 'Enviando…' : 'Traduzir'}
-              </button>
-
-              {erroUpload && <p className="mt-2 text-xs text-erro">{erroUpload}</p>}
-
-              {/* Glossário de nomes próprios */}
-              <div className="mt-4 border-t border-borda pt-3">
-                <label
-                  htmlFor="campo-glossario"
-                  className="mb-1 block text-xs font-medium text-suave"
-                >
-                  Glossário de nomes próprios
-                </label>
-                <input
-                  id="campo-glossario"
-                  type="file"
-                  accept=".yaml,.yml,.json,.txt"
-                  onChange={(evento) => {
-                    void aoEscolherGlossario(evento)
-                  }}
-                  className={CLASSE_ARQUIVO}
-                />
-                <p className="mt-1 text-[11px] leading-relaxed text-suave">
-                  Nomes próprios não devem ser traduzidos. Exemplo:{' '}
-                  <code className="text-texto">Man-God: Man-God</code>. Aceita JSON
-                  ou YAML simples — o formato é reconhecido pelo conteúdo do arquivo.
-                </p>
-                {nomeGlossario && (
-                  <p className="mt-1 text-[11px] text-suave">
-                    {nomeGlossario} — {totalTermos}{' '}
-                    {totalTermos === 1 ? 'termo carregado' : 'termos carregados'}
-                    {totalTermos > 0 && (
-                      <>
-                        {' '}
-                        · {totalTermos}{' '}
-                        {totalTermos === 1
-                          ? 'termo será enviado ao modelo'
-                          : 'termos serão enviados ao modelo'}
-                      </>
-                    )}
-                  </p>
-                )}
-                {erroGlossario && <p className="mt-1 text-[11px] text-erro">{erroGlossario}</p>}
-              </div>
             </section>
           </div>
-        </div>
-      </header>
+        </main>
+      ) : (
+        <main className="grid min-h-0 grid-rows-[auto_auto_minmax(0,1fr)_auto]">
+          {/* ---------------- Barra do job ------------------------------- */}
+          <header className="flex h-12 items-center gap-3 border-b border-borda px-5">
+            <span className={`h-2 w-2 shrink-0 rounded-full ${COR_PONTO[ui.estado]} ${ui.estado === 'running' ? 'animate-pulso motion-reduce:animate-none' : ''}`} />
+            <h1 className="min-w-0 truncate text-[15px] font-semibold" title={ui.nomeSaida ?? ''}>
+              {nomeDoLivro(ui.nomeSaida)}
+            </h1>
+            <span className="shrink-0 text-suave">
+              {ui.aguardando === 'pausa'
+                ? 'pausando ao fim do lote…'
+                : ui.aguardando === 'retomada'
+                  ? 'retomando…'
+                  : ROTULO_ESTADO[ui.estado].toLowerCase()}
+              {ui.modelo ? ` · ${ui.modelo}` : ''}
+            </span>
 
-      {/* ============================================================= */}
-      {/* FAIXA 2 — BARRA DE PROGRESSO                                   */}
-      {/* ============================================================= */}
-      {temJob && (
-        <section className="border-b border-borda bg-fundo">
-          <div className="mx-auto max-w-7xl space-y-4 px-4 py-4">
-            <ProgressBar
-              percent={percentual}
-              eta_s={ui.eta_s}
-              elapsed_s={ui.elapsed_s}
-              estado={ui.estado}
-              pausando={ui.aguardando === 'pausa'}
-              onPausar={() => {
-                void aoPausar()
-              }}
-              onRetomar={() => {
-                void aoRetomar()
-              }}
-              onCancelar={() => {
-                void aoCancelar()
-              }}
-            />
-
-            <MetricsPanel
-              translated={ui.translated}
-              cached={ui.cached}
-              failed={ui.failed}
-              discarded={ui.discarded}
-              detalhes={ui.detalhes}
-            />
-
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <p className="text-xs text-suave">
-                {ui.arquivo ? (
-                  <>
-                    Capítulo atual: <span className="text-texto">{ui.arquivo}</span> — bloco{' '}
-                    <span className="text-texto">{ui.bloco ?? 0}</span> de{' '}
-                    <span className="text-texto">{ui.total}</span>
-                  </>
-                ) : (
-                  'Preparando a tradução…'
-                )}
-              </p>
-              <button
-                type="button"
-                onClick={() => {
-                  void aoDescartarCache()
-                }}
-                className={CLASSE_BOTAO}
-                title="Apaga o cache deste job: todo o progresso é perdido"
-              >
-                Descartar cache
-              </button>
-            </div>
-
-            <p className="text-[11px] leading-relaxed text-suave">
-              Cada lote de {TAMANHO_LOTE} blocos leva cerca de 90 s no LM Studio: a barra só
-              avança quando o lote termina — isso é normal, a tradução continua trabalhando.
-            </p>
-
-            {ui.aguardando === 'pausa' && (
-              <p className="text-xs text-aviso">
-                Pausando… — o lote que está em andamento ainda termina antes de parar.
-              </p>
-            )}
-            {ui.aguardando === 'retomada' && (
-              <p className="text-xs text-aviso">
-                Retomando… — os blocos já traduzidos voltam do cache.
-              </p>
-            )}
-            {ui.mensagem && <p className="text-xs text-suave">{ui.mensagem}</p>}
-            {ui.erro && <p className="text-xs text-erro">{ui.erro}</p>}
-            {avisoConexao && <p className="text-xs text-aviso">{avisoConexao}</p>}
-          </div>
-        </section>
-      )}
-
-      {/* ============================================================= */}
-      {/* FAIXA 3 — ÁREA PRINCIPAL                                        */}
-      {/* ============================================================= */}
-      <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-6">
-        {!temJob ? (
-          <div className="rounded-lg border border-borda bg-surface p-6">
-            <h2 className="text-sm font-semibold text-texto">Como usar</h2>
-            <ol className="mt-3 list-decimal space-y-1 pl-5 text-sm text-suave">
-              <li>Escolha o provedor de modelos (LM Studio local ou API compatível com OpenAI).</li>
-              <li>Selecione o arquivo .epub e clique em “Traduzir”.</li>
-              <li>
-                Acompanhe o progresso em tempo real; um lote leva cerca de 90 s, então a barra
-                fica parada de vez em quando.
-              </li>
-              <li>Ao final, baixe o EPUB traduzido e confira a verificação de integridade.</li>
-            </ol>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-[18rem_minmax(0,1fr)]">
-            <div className="min-w-0">
-              <ChapterNav
-                capitulos={capitulos}
-                ativo={capitulo}
-                onSelecionar={(caminho) => setCapitulo(caminho)}
-                carregando={carregandoCapitulos}
-              />
-              {erroCapitulos && <p className="mt-2 text-xs text-erro">{erroCapitulos}</p>}
-            </div>
-
-            <div className="min-w-0 space-y-4">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <h2 className="text-sm font-semibold text-texto">{tituloCapitulo}</h2>
-                <button
-                  type="button"
-                  onClick={() => setNoncePreview((valor) => valor + 1)}
-                  className={CLASSE_BOTAO}
-                  title="Recarrega o preview (o lado traduzido usa o cache atual)"
+            <div className="ml-auto flex items-center gap-2">
+              {ui.estado === 'running' && (
+                <Botao
+                  icone="seguir"
+                  variante={seguindo ? 'atual' : 'neutro'}
+                  aria-pressed={seguindo}
+                  onClick={() => setSeguindo((v) => !v)}
+                  title="O preview abre o capítulo em tradução e acompanha o bloco atual; rolar à mão desliga"
                 >
-                  Atualizar preview
-                </button>
+                  {seguindo ? 'Seguindo a tradução' : 'Seguir tradução'}
+                </Botao>
+              )}
+              {ui.estado === 'running' && (
+                <Botao icone="pausar" onClick={() => void aoPausar()} disabled={ui.aguardando === 'pausa'}
+                  title="A pausa vale entre lotes: o lote atual ainda termina">
+                  Pausar
+                </Botao>
+              )}
+              {ui.estado === 'paused' && (
+                <Botao icone="retomar" variante="primario" onClick={() => void retomar('Retomando — o que já foi traduzido vem do cache.')}>
+                  Retomar
+                </Botao>
+              )}
+              {podeRetraduzir && (
+                <Botao
+                  icone="refazer"
+                  variante="aviso"
+                  onClick={() => void retomar('Retraduzindo só os blocos que faltam — o resto vem do cache.')}
+                  title="Manda ao modelo só os blocos sem tradução; o resto vem do cache"
+                >
+                  Retraduzir {n(semTraducao)} {semTraducao === 1 ? 'bloco' : 'blocos'}
+                </Botao>
+              )}
+              {podeBaixar && (
+                <Botao icone="baixar" variante={semTraducao === 0 ? 'sucesso' : 'neutro'} onClick={() => void aoBaixar()}>
+                  Baixar EPUB
+                </Botao>
+              )}
+              {rodando && (
+                <Botao icone="parar" variante="perigo" onClick={() => void aoCancelar()} className="ml-3">
+                  Cancelar
+                </Botao>
+              )}
+            </div>
+          </header>
+
+          {/* ---------------- Instrumento -------------------------------- */}
+          <section className="grid grid-cols-[13.5rem_minmax(0,1fr)] border-b border-borda bg-surface">
+            {/* Margem numérica: quanto falta, num relance. */}
+            <div className="flex flex-col border-r border-borda px-5 py-4">
+              <div>
+                <div className="num font-mono text-[54px] font-light leading-none tracking-[-0.03em] text-texto">
+                  {percentual.toFixed(1).replace('.', ',')}
+                  <span className="text-[26px] text-suave">%</span>
+                </div>
+                <div className="num mt-2 font-mono text-[12px] text-suave">
+                  {n(prontos)} / {n(totalBlocos)} blocos
+                </div>
+                {(ui.failed > 0 || ui.discarded > 0 || (ui.estado === 'done' && semTraducao > 0)) && (
+                  <div className="num mt-2 flex flex-wrap gap-x-3 font-mono text-[15px]">
+                    {ui.failed > 0 && <span className="text-erro">{n(ui.failed)} falhas</span>}
+                    {ui.discarded > 0 && <span className="text-aviso">{n(ui.discarded)} descartados</span>}
+                    {ui.failed === 0 && ui.discarded === 0 && (
+                      <span className="text-erro">{n(semTraducao)} sem tradução</span>
+                    )}
+                  </div>
+                )}
               </div>
+              <dl className="mt-5 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[12px]">
+                {ui.estado === 'running' && (
+                  <>
+                    <dt className="text-suave">restante</dt>
+                    <dd className="num text-right font-mono text-texto">
+                      {ui.eta_s !== null ? `~${relogio(ui.eta_s)}` : '—'}
+                    </dd>
+                  </>
+                )}
+                <dt className="text-suave">decorrido</dt>
+                <dd className="num text-right font-mono text-texto">{relogio(ui.elapsed_s)}</dd>
+                {ritmo !== null && (
+                  <>
+                    <dt className="text-suave">ritmo</dt>
+                    <dd className="num text-right font-mono text-texto">{ritmo.toFixed(0)} blocos/min</dd>
+                  </>
+                )}
+              </dl>
+            </div>
 
-              <SideBySide
-                htmlOriginal={htmlOriginal}
-                htmlTraduzido={htmlTraduzido}
-                css={css}
-                carregando={carregandoPreview}
-                erro={erroPreview}
-              />
+            <div className="min-w-0 px-5 pb-3 pt-4">
+              {capitulosDoCampo.length > 0 ? (
+                <CampoDeBlocos
+                  capitulos={capitulosDoCampo}
+                  versao={versaoCampo}
+                  rodando={rodando}
+                  concluido={ui.estado === 'done'}
+                  atual={atual}
+                  chegadas={chegadasRef.current}
+                  onEscolher={(path, indice) => {
+                    setSeguindo(false)
+                    setCapitulo(path)
+                    setIrPara({ indice, n: Date.now() })
+                  }}
+                />
+              ) : (
+                <div className="h-44 bg-borda/40" />
+              )}
 
-              {(ui.estado === 'done' || ui.integridade.length > 0) && (
-                <IntegrityPanel itens={ui.integridade} />
+              {/* Legenda = contadores: cada cor com a sua contagem. */}
+              <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-1 text-[12px] text-suave">
+                {(
+                  [
+                    ['bg-sucesso', 'traduzidos agora', n(ui.translated), 'text-sucesso', undefined],
+                    ['bg-cache', 'do cache', n(ui.cached), 'text-cache', undefined],
+                    ['bg-erro', 'falhas', n(ui.failed), ui.failed > 0 ? 'text-erro' : 'text-texto', ui.detalhes.falhou],
+                    ['bg-aviso', 'descartados', n(ui.discarded), ui.discarded > 0 ? 'text-aviso' : 'text-texto', ui.detalhes.descartado],
+                    ...(semTraducao > 0
+                      ? [[
+                          ui.estado === 'done' ? 'bg-erro' : rodando ? 'bg-[#2b3139]' : 'bg-[#333a44]',
+                          ui.estado === 'done' ? 'sem tradução' : rodando ? 'por traduzir' : 'não traduzidos',
+                          n(semTraducao),
+                          ui.estado === 'done' ? 'text-erro' : 'text-texto',
+                          undefined,
+                        ] as const]
+                      : []),
+                  ] as const
+                ).map(([cor, rotulo, valor, corValor, titulo]) => (
+                  <span key={rotulo} className="inline-flex items-center gap-1.5" title={titulo}>
+                    <span className={`inline-block h-3 w-[3px] ${cor}`} />
+                    {rotulo}
+                    <span className={`num font-mono ${corValor}`}>{valor}</span>
+                  </span>
+                ))}
+                {ui.estado === 'running' && (
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className="inline-block h-3 w-[3px] bg-atual" />
+                    em tradução
+                  </span>
+                )}
+                <span className="ml-auto">
+                  {ui.mensagem || ui.erro || avisoConexao ? (
+                    <span className={ui.erro ? 'text-erro' : avisoConexao ? 'text-aviso' : 'text-texto'}>
+                      {ui.erro ?? avisoConexao ?? ui.mensagem}
+                    </span>
+                  ) : (
+                    'clique num traço para abrir o bloco'
+                  )}
+                </span>
+              </div>
+            </div>
+          </section>
+
+          {/* ---------------- Bancada: capítulos + preview -------------- */}
+          <div className="grid min-h-0 grid-cols-[17rem_minmax(0,1fr)]">
+            <nav className="flex min-h-0 flex-col border-r border-borda" aria-label="Capítulos">
+              <div className="flex h-9 shrink-0 items-center justify-between border-b border-borda px-4">
+                <h2 className="painel-titulo">Capítulos</h2>
+                <span className="num text-[11px] text-suave">{capitulos.length}</span>
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto">
+                <ChapterNav
+                  itens={itensCapitulos}
+                  ativo={capitulo}
+                  emTraducao={ui.estado === 'running' ? ui.arquivo : null}
+                  rodando={rodando}
+                  concluido={ui.estado === 'done'}
+                  onSelecionar={setCapitulo}
+                  carregando={carregandoCapitulos}
+                />
+                {erroCapitulos && <p className="px-4 py-2 text-erro">{erroCapitulos}</p>}
+              </div>
+            </nav>
+
+            <div className="min-h-0 min-w-0">
+              {capituloAtivo ? (
+                <SideBySide
+                  capitulo={capituloAtivo.path}
+                  htmlOriginal={htmlOriginal}
+                  htmlTraduzido={htmlTraduzido}
+                  css={css}
+                  carregando={carregandoPreview}
+                  erro={erroPreview}
+                  blocoAtual={atual && atual.path === capituloAtivo.path ? atual.indice : null}
+                  irPara={irPara}
+                  pendentes={itemAtivo?.semTraducao ?? 0}
+                  aoRolarManual={() => setSeguindo(false)}
+                  rodando={rodando}
+                  concluido={ui.estado === 'done'}
+                />
+              ) : (
+                <p className="p-6 text-suave">Escolha um capítulo para comparar.</p>
               )}
             </div>
           </div>
-        )}
-      </main>
 
-      <footer className="border-t border-borda px-4 py-3 text-center text-xs text-suave">
-        Tradutor de EPUB — tudo roda localmente.
-      </footer>
+          {/* ---------------- Doca --------------------------------------- */}
+          <section className="flex min-h-0 flex-col border-t border-borda bg-surface">
+            <div className="flex h-9 shrink-0 items-center gap-1 px-2">
+              {(
+                [
+                  ['log', 'log', 'Log'],
+                  ['integridade', 'escudo', 'Integridade'],
+                  ['provedor', 'chave', 'Provedor'],
+                ] as const
+              ).map(([id, icone, rotulo]) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => {
+                    setAba(id)
+                    setDocaAberta(aba === id ? !docaAberta : true)
+                  }}
+                  className={`inline-flex h-7 items-center gap-1.5 rounded px-2.5 transition-colors ${
+                    aba === id && docaAberta ? 'bg-elevado text-texto' : 'text-suave hover:text-texto'
+                  }`}
+                >
+                  <Icone nome={icone} className="h-3.5 w-3.5" />
+                  {rotulo}
+                  {id === 'integridade' && ui.integridade.length > 0 && (
+                    <span className={`num text-[11px] ${ui.integridade.every((i) => i.ok) ? 'text-sucesso' : 'text-erro'}`}>
+                      {ui.integridade.filter((i) => i.ok).length}/{ui.integridade.length}
+                    </span>
+                  )}
+                </button>
+              ))}
+              {aba === 'log' && docaAberta && (
+                <label className="ml-3 inline-flex cursor-pointer items-center gap-1.5 text-[12px] text-suave">
+                  <input
+                    type="checkbox"
+                    checked={soProblemas}
+                    onChange={(e) => setSoProblemas(e.target.checked)}
+                    className="accent-suave"
+                  />
+                  só avisos e erros
+                </label>
+              )}
+              <div className="ml-auto flex items-center gap-1">
+                {parado && (
+                  <button
+                    type="button"
+                    onClick={() => void aoDescartarCache()}
+                    className="mr-2 text-[12px] text-suave transition-colors hover:text-erro"
+                  >
+                    Descartar cache
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setDocaAberta((v) => !v)}
+                  className="rounded p-1.5 text-suave transition-colors hover:text-texto"
+                  aria-label={docaAberta ? 'Recolher o painel' : 'Abrir o painel'}
+                  title={docaAberta ? 'Recolher' : 'Abrir'}
+                >
+                  <Icone nome="seguir" className={`h-3.5 w-3.5 transition-transform ${docaAberta ? '' : 'rotate-180'}`} />
+                </button>
+              </div>
+            </div>
+            {docaAberta && (
+              <div className="h-44 min-h-0 border-t border-borda bg-fundo">
+                {aba === 'log' && <LogAoVivo jobId={jobId} rodando={ui.estado === 'running'} soProblemas={soProblemas} />}
+                {aba === 'integridade' && (
+                  <div className="h-full overflow-y-auto">
+                    <IntegrityPanel itens={ui.integridade} />
+                  </div>
+                )}
+                {aba === 'provedor' && (
+                  <div className="h-full overflow-y-auto">
+                    <ProviderSelector
+                      provider={provedor.provider}
+                      base_url={provedor.base_url}
+                      api_key={provedor.api_key}
+                      model={provedor.model}
+                      onChange={alterarProvedor}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
+        </main>
+      )}
     </div>
   )
 }
